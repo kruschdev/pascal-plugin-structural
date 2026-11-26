@@ -165,6 +165,172 @@ type ExtractedRoofSegment = {
   wallHeightM: number
 }
 
+type Vec3Tuple = [number, number, number]
+
+/**
+ * Evaluate the top roof-plane elevation `y` of `seg` at world `(wx, wz)`, or `null`
+ * if `(wx, wz)` falls outside `seg`'s plan footprint (including eave overhang).
+ */
+function evaluateRoofSurfaceY(seg: ExtractedRoofSegment, wx: number, wz: number): number | null {
+  const cosR = Math.cos(seg.yaw)
+  const sinR = Math.sin(seg.yaw)
+  const dx = wx - seg.cx
+  const dz = wz - seg.cz
+  // Exact inverse of Three.js Ry(yaw): (lx*cos + lz*sin, -lx*sin + lz*cos)
+  const lx = dx * cosR - dz * sinR
+  const lz = dx * sinR + dz * cosR
+  if (Math.abs(lx) > seg.widthM / 2 + 0.02 || Math.abs(lz) > seg.depthM / 2 + seg.overhangM + 0.02) {
+    return null
+  }
+  const slopeTan = Math.tan(seg.pitchRad)
+  if (seg.roofType === 'shed') {
+    return seg.cy + (seg.depthM / 2 - lz) * slopeTan
+  }
+  return seg.cy + (seg.depthM / 2 - Math.abs(lz)) * slopeTan
+}
+
+function roofSegmentPeakY(seg: ExtractedRoofSegment): number {
+  const slopeTan = Math.tan(seg.pitchRad)
+  return seg.cy + (seg.roofType === 'shed' ? seg.depthM : seg.depthM / 2) * slopeTan
+}
+
+/**
+ * Find sibling roof segments on the same level that dominate `seg` (higher peak, or equal
+ * peak with larger footprint area) and overlap `seg` in plan — e.g. a main gable hosting a
+ * perpendicular California over-framed cross-gable or dormer.
+ */
+function findDominatingHostRoofs(
+  seg: ExtractedRoofSegment,
+  segIdx: number,
+  allSegments: readonly ExtractedRoofSegment[],
+): ExtractedRoofSegment[] {
+  if (allSegments.length <= 1) return []
+  const segPeak = roofSegmentPeakY(seg)
+  const segArea = seg.widthM * seg.depthM
+  const cosR = Math.cos(seg.yaw)
+  const sinR = Math.sin(seg.yaw)
+  const hosts: ExtractedRoofSegment[] = []
+
+  for (let oIdx = 0; oIdx < allSegments.length; oIdx++) {
+    if (oIdx === segIdx) continue
+    const other = allSegments[oIdx]!
+    const otherPeak = roofSegmentPeakY(other)
+    const otherArea = other.widthM * other.depthM
+    const dominates =
+      otherPeak > segPeak + 0.04 ||
+      (Math.abs(otherPeak - segPeak) <= 0.04 &&
+        (otherArea > segArea + 0.1 || (Math.abs(otherArea - segArea) <= 0.1 && oIdx < segIdx)))
+    if (!dominates) continue
+
+    // Verify 2D plan overlap on a 5x5 grid over `seg`
+    let overlaps = false
+    for (let ix = -2; ix <= 2 && !overlaps; ix++) {
+      const lx = (seg.widthM / 2) * (ix / 2)
+      for (let iz = -2; iz <= 2 && !overlaps; iz++) {
+        const lz = (seg.depthM / 2) * (iz / 2)
+        const wx = seg.cx + lx * cosR + lz * sinR
+        const wz = seg.cz - lx * sinR + lz * cosR
+        if (evaluateRoofSurfaceY(other, wx, wz) !== null) overlaps = true
+      }
+    }
+    if (overlaps) hosts.push(other)
+  }
+  return hosts
+}
+
+function hostSurfaceYAt(wx: number, wz: number, hosts: readonly ExtractedRoofSegment[]): number | null {
+  let maxY: number | null = null
+  for (const h of hosts) {
+    const hy = evaluateRoofSurfaceY(h, wx, wz)
+    if (hy !== null && (maxY === null || hy > maxY)) maxY = hy
+  }
+  return maxY
+}
+
+function lerpVec3(pA: readonly [number, number, number], pB: readonly [number, number, number], t: number): Vec3Tuple {
+  return [pA[0] + (pB[0] - pA[0]) * t, pA[1] + (pB[1] - pA[1]) * t, pA[2] + (pB[2] - pA[2]) * t]
+}
+
+/**
+ * Clip a 3D framing member segment `pA -> pB` so ONLY the portion resting on or above all
+ * dominating host roof planes is kept. Prevents over-framed cross-gables & dormers from
+ * plunging beneath the primary roof into the house interior.
+ */
+function clipSegmentAboveHosts(
+  pA: readonly [number, number, number],
+  pB: readonly [number, number, number],
+  hosts: readonly ExtractedRoofSegment[],
+  tol = 0.015,
+): { start: Vec3Tuple; end: Vec3Tuple; clippedStart: boolean; clippedEnd: boolean } | null {
+  if (hosts.length === 0) {
+    return {
+      start: [pA[0], pA[1], pA[2]],
+      end: [pB[0], pB[1], pB[2]],
+      clippedStart: false,
+      clippedEnd: false,
+    }
+  }
+  const totalLen = Math.hypot(pB[0] - pA[0], pB[1] - pA[1], pB[2] - pA[2])
+  if (totalLen < 0.02) return null
+
+  const clearance = (t: number): number => {
+    const x = pA[0] + (pB[0] - pA[0]) * t
+    const y = pA[1] + (pB[1] - pA[1]) * t
+    const z = pA[2] + (pB[2] - pA[2]) * t
+    const hy = hostSurfaceYAt(x, z, hosts)
+    return hy === null ? Number.POSITIVE_INFINITY : y - hy
+  }
+
+  const refineTransition = (tIn: number, tOut: number): number => {
+    let lo = tIn
+    let hi = tOut
+    for (let iter = 0; iter < 14; iter++) {
+      const mid = (lo + hi) * 0.5
+      if (clearance(mid) >= -tol) lo = mid
+      else hi = mid
+    }
+    return lo
+  }
+
+  const N = 64
+  let bestT0 = -1
+  let bestT1 = -1
+  let curStart = -1
+  let prevInside = clearance(0) >= -tol
+  if (prevInside) curStart = 0
+
+  for (let i = 1; i <= N; i++) {
+    const tPrev = (i - 1) / N
+    const tCur = i / N
+    const curInside = clearance(tCur) >= -tol
+    if (!prevInside && curInside) {
+      curStart = refineTransition(tCur, tPrev)
+    } else if (prevInside && !curInside) {
+      const tEnd = refineTransition(tPrev, tCur)
+      if (tEnd - curStart > bestT1 - bestT0) {
+        bestT0 = curStart
+        bestT1 = tEnd
+      }
+      curStart = -1
+    }
+    prevInside = curInside
+  }
+  if (prevInside && curStart >= 0) {
+    if (1 - curStart > bestT1 - bestT0) {
+      bestT0 = curStart
+      bestT1 = 1
+    }
+  }
+
+  if (bestT0 < 0 || (bestT1 - bestT0) * totalLen < 0.08) return null
+  return {
+    start: lerpVec3(pA, pB, bestT0),
+    end: lerpVec3(pA, pB, bestT1),
+    clippedStart: bestT0 > 0.002,
+    clippedEnd: bestT1 < 0.998,
+  }
+}
+
 function shouldAdoptWallLessRoofLevel(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   targetLevelId: string,
@@ -766,7 +932,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     const chordDepthM = (isTruss ? 5.5 : 7.25) * INCHES_TO_METERS
     const memberThickM = 0.0381
 
-    for (const seg of roofSegments) {
+    for (let segIdx = 0; segIdx < roofSegments.length; segIdx++) {
+      const seg = roofSegments[segIdx]!
       if (seg.widthM < 0.3 || seg.depthM < 0.3) continue
       const cosR = Math.cos(seg.yaw)
       const sinR = Math.sin(seg.yaw)
@@ -778,7 +945,19 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         seg.cz - lx * sinR + lz * cosR,
       ]
       const ridgeAxisWorld: [number, number, number] = [cosR, 0, -sinR]
+      const slopeAxisWorld: [number, number, number] = [sinR, 0, cosR]
       const slopeTan = Math.tan(seg.pitchRad)
+
+      // Detect dominating host roof planes (e.g. main gable hosting a perpendicular cross-gable or dormer)
+      // so secondary roof rafters, ridge beam, webs & rake studs clip cleanly along California valley lines
+      // and NEVER plunge below the primary roof into the house interior.
+      const hostRoofs = findDominatingHostRoofs(seg, segIdx, roofSegments)
+      const isOverFramed = hostRoofs.length > 0
+      const isPointAboveHosts = (pt: readonly [number, number, number], tol = 0.03): boolean => {
+        if (!isOverFramed) return true
+        const hy = hostSurfaceYAt(pt[0], pt[2], hostRoofs)
+        return hy === null || pt[1] >= hy - tol
+      }
 
       if (seg.roofType === 'shed') {
         // Single sloping plane from -depth/2 (high wall) down to +depth/2 (low eave)
@@ -788,10 +967,16 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const lx = -seg.widthM / 2 + (seg.widthM * i) / Math.max(1, count - 1)
           const pHigh = toWorld(lx, riseM + seg.overhangM * slopeTan, -seg.depthM / 2 - seg.overhangM)
           const pLow = toWorld(lx, -seg.overhangM * slopeTan, seg.depthM / 2 + seg.overhangM)
-          pushStrut('lumber', pHigh, pLow, chordDepthM, memberThickM, ridgeAxisWorld)
+          const clipped = clipSegmentAboveHosts(pHigh, pLow, hostRoofs, 0.015)
+          if (!clipped) continue
+          pushStrut('lumber', clipped.start, clipped.end, chordDepthM, memberThickM, ridgeAxisWorld)
           if (showConnectors) {
-            boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM, -seg.depthM / 2 + 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
-            boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, seg.depthM / 2 - 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
+            if (!clipped.clippedStart) {
+              boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM, -seg.depthM / 2 + 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
+            }
+            if (!clipped.clippedEnd) {
+              boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, seg.depthM / 2 - 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
+            }
           }
         }
         continue
@@ -803,8 +988,18 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       const ridgeHalfThick = isTruss ? 0 : 0.0445 // rafters butt cleanly against ridge beam face
       const eaveDropY = seg.overhangM * slopeTan
 
+      // Clip ridge line against any dominating host roof so over-framed ridges stop flush on the valley intersection
+      const ridgeTopStart = toWorld(-seg.widthM / 2, riseM, 0)
+      const ridgeTopEnd = toWorld(seg.widthM / 2, riseM, 0)
+      const ridgeClip = clipSegmentAboveHosts(ridgeTopStart, ridgeTopEnd, hostRoofs, 0.015)
+      if (!ridgeClip) continue
+
       // Structural LVL / Glulam Ridge Beam (for stick rafters & cathedral), honoring vis.beams & avoiding duplicates with persisted ridge beams
-      const ridgeCenterWorld = toWorld(0, riseM - 0.09, 0)
+      const ridgeCenterWorld: [number, number, number] = [
+        (ridgeClip.start[0] + ridgeClip.end[0]) / 2,
+        (ridgeClip.start[1] + ridgeClip.end[1]) / 2 - 0.09,
+        (ridgeClip.start[2] + ridgeClip.end[2]) / 2,
+      ]
       const hasPersistedRidge = persistedRidgeBeams.some((rb) => {
         const bs = rb.start as Vec2 | undefined
         const be = rb.end as Vec2 | undefined
@@ -814,17 +1009,31 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         return Math.hypot(bmx - ridgeCenterWorld[0], bmz - ridgeCenterWorld[2]) <= Math.max(seg.widthM * 0.6, 1.5)
       })
       if (!isTruss && showBeams && !hasPersistedRidge) {
-        boxes.push({
-          bucket: 'header-lvl',
-          center: ridgeCenterWorld,
-          size: [seg.widthM, 0.24, 0.089],
-          rotY: seg.yaw,
-        })
+        const rLen = Math.hypot(
+          ridgeClip.end[0] - ridgeClip.start[0],
+          ridgeClip.end[1] - ridgeClip.start[1],
+          ridgeClip.end[2] - ridgeClip.start[2],
+        )
+        if (rLen > 0.12) {
+          boxes.push({
+            bucket: 'header-lvl',
+            center: ridgeCenterWorld,
+            size: [rLen, 0.24, 0.089],
+            rotY: seg.yaw,
+          })
+        }
       }
+
+      const valleyPtsN: Vec3Tuple[] = []
+      const valleyPtsS: Vec3Tuple[] = []
 
       const count = Math.max(2, Math.floor(seg.widthM / rafterSpacingM) + 1)
       for (let i = 0; i < count; i++) {
         const lx = -seg.widthM / 2 + (seg.widthM * i) / Math.max(1, count - 1)
+
+        // Skip stations whose ridge peak is buried completely underneath a dominating host roof
+        const pPeakCenter = toWorld(lx, riseM, 0)
+        if (!isPointAboveHosts(pPeakCenter, 0.015)) continue
 
         // Exact peak & eave overhang endpoints (overhang extends ONLY downhill — zero X-cross at ridge!)
         const pPeakN = toWorld(lx, riseM, -ridgeHalfThick)
@@ -834,12 +1043,25 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         const pWallN = toWorld(lx, 0.06, -halfRun)
         const pWallS = toWorld(lx, 0.06, halfRun)
 
-        // North (-Z) and South (+Z) sloped rafters / top truss chords
-        pushStrut('lumber', pPeakN, pEaveN, chordDepthM, memberThickM, ridgeAxisWorld)
-        pushStrut('lumber', pPeakS, pEaveS, chordDepthM, memberThickM, ridgeAxisWorld)
+        // North (-Z) and South (+Z) sloped rafters / valley jack rafters (clipped cleanly on host roof planes!)
+        const clipN = clipSegmentAboveHosts(pPeakN, pEaveN, hostRoofs, 0.015)
+        const clipS = clipSegmentAboveHosts(pPeakS, pEaveS, hostRoofs, 0.015)
+        if (clipN) {
+          pushStrut('lumber', clipN.start, clipN.end, chordDepthM, memberThickM, ridgeAxisWorld)
+          if (isOverFramed && clipN.clippedEnd) valleyPtsN.push(clipN.end)
+        }
+        if (clipS) {
+          pushStrut('lumber', clipS.start, clipS.end, chordDepthM, memberThickM, ridgeAxisWorld)
+          if (isOverFramed && clipS.clippedEnd) valleyPtsS.push(clipS.end)
+        }
 
-        // Ceiling joist / bottom truss chord
-        if (roofSystem !== 'ridge-beam-cathedral') {
+        // Ceiling joist / bottom truss chord (omit when buried inside an over-framed host roof cavity!)
+        const ceilingAboveHosts =
+          !isOverFramed ||
+          (isPointAboveHosts(pWallN, 0.08) &&
+            isPointAboveHosts(pWallS, 0.08) &&
+            isPointAboveHosts(toWorld(lx, 0.06, 0), 0.08))
+        if (roofSystem !== 'ridge-beam-cathedral' && ceilingAboveHosts) {
           if (roofSystem === 'scissor-truss') {
             const scPeak = toWorld(lx, riseM * 0.45, 0)
             pushStrut('lumber', pWallN, scPeak, 0.089, memberThickM, ridgeAxisWorld)
@@ -859,50 +1081,101 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const pBotN = toWorld(lx, botY, -halfRun / 3)
           const pBotS = toWorld(lx, botY, halfRun / 3)
 
+          const pushClippedWeb = (a: readonly [number, number, number], b: readonly [number, number, number]) => {
+            const c = clipSegmentAboveHosts(a, b, hostRoofs, 0.015)
+            if (c) pushStrut('lumber', c.start, c.end, 0.089, memberThickM, ridgeAxisWorld)
+          }
+
           if (roofSystem === 'attic-truss') {
             // Attic room knee walls + collar ceiling beam
             const roomZ = halfRun * 0.45
             const roomTopY = riseM * (1 - 0.45)
-            pushStrut('lumber', toWorld(lx, 0.06, -roomZ), toWorld(lx, roomTopY, -roomZ), 0.089, memberThickM, ridgeAxisWorld)
-            pushStrut('lumber', toWorld(lx, 0.06, roomZ), toWorld(lx, roomTopY, roomZ), 0.089, memberThickM, ridgeAxisWorld)
-            pushStrut('lumber', toWorld(lx, roomTopY, -roomZ), toWorld(lx, roomTopY, roomZ), 0.089, memberThickM, ridgeAxisWorld)
+            pushClippedWeb(toWorld(lx, 0.06, -roomZ), toWorld(lx, roomTopY, -roomZ))
+            pushClippedWeb(toWorld(lx, 0.06, roomZ), toWorld(lx, roomTopY, roomZ))
+            pushClippedWeb(toWorld(lx, roomTopY, -roomZ), toWorld(lx, roomTopY, roomZ))
           } else {
             // Classic 4-strut Fink W-web: BN->MN, BN->Peak, BS->Peak, BS->MS
-            pushStrut('lumber', pBotN, pMidN, 0.089, memberThickM, ridgeAxisWorld)
-            pushStrut('lumber', pBotN, pPeak, 0.089, memberThickM, ridgeAxisWorld)
-            pushStrut('lumber', pBotS, pPeak, 0.089, memberThickM, ridgeAxisWorld)
-            pushStrut('lumber', pBotS, pMidS, 0.089, memberThickM, ridgeAxisWorld)
+            pushClippedWeb(pBotN, pMidN)
+            pushClippedWeb(pBotN, pPeak)
+            pushClippedWeb(pBotS, pPeak)
+            pushClippedWeb(pBotS, pMidS)
           }
 
-          // Galvanized steel truss gusset connector plates at Peak, Heels & Panel Points
-          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM - 0.06, 0), size: [0.048, 0.14, 0.22], rotY: seg.yaw })
-          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.07, -halfRun + 0.14), size: [0.048, 0.10, 0.20], rotY: seg.yaw })
-          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.07, halfRun - 0.14), size: [0.048, 0.10, 0.20], rotY: seg.yaw })
-          boxes.push({ bucket: 'galv-steel', center: pBotN, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
-          boxes.push({ bucket: 'galv-steel', center: pBotS, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+          // Galvanized steel truss gusset connector plates at Peak, Heels & Panel Points (only where above host roofs)
+          const pPeakPlate = toWorld(lx, riseM - 0.06, 0)
+          const pHeelN = toWorld(lx, 0.07, -halfRun + 0.14)
+          const pHeelS = toWorld(lx, 0.07, halfRun - 0.14)
+          if (isPointAboveHosts(pPeakPlate, 0.08)) {
+            boxes.push({ bucket: 'galv-steel', center: pPeakPlate, size: [0.048, 0.14, 0.22], rotY: seg.yaw })
+          }
+          if (isPointAboveHosts(pHeelN, 0.08)) {
+            boxes.push({ bucket: 'galv-steel', center: pHeelN, size: [0.048, 0.10, 0.20], rotY: seg.yaw })
+          }
+          if (isPointAboveHosts(pHeelS, 0.08)) {
+            boxes.push({ bucket: 'galv-steel', center: pHeelS, size: [0.048, 0.10, 0.20], rotY: seg.yaw })
+          }
+          if (isPointAboveHosts(pBotN, 0.05)) {
+            boxes.push({ bucket: 'galv-steel', center: pBotN, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+          }
+          if (isPointAboveHosts(pBotS, 0.05)) {
+            boxes.push({ bucket: 'galv-steel', center: pBotS, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+          }
         } else if (roofSystem === 'stick-rafter' && i % 2 === 0 && halfRun > 1.2) {
-          // Upper-third collar tie per IRC R802.4.6
+          // Upper-third collar tie per IRC R802.4.6 (only emit when fully clear above host roof)
           const tieZ = halfRun * 0.34
           const tieY = riseM * 0.66
-          pushStrut('lumber', toWorld(lx, tieY, -tieZ), toWorld(lx, tieY, tieZ), 0.089, memberThickM, ridgeAxisWorld)
+          const tieA = toWorld(lx, tieY, -tieZ)
+          const tieB = toWorld(lx, tieY, tieZ)
+          const tieClip = clipSegmentAboveHosts(tieA, tieB, hostRoofs, 0.015)
+          if (tieClip && !tieClip.clippedStart && !tieClip.clippedEnd) {
+            pushStrut('lumber', tieClip.start, tieClip.end, 0.089, memberThickM, ridgeAxisWorld)
+          }
         }
 
-        // Gable-end vertical rake studs at both end trusses/rafters (i === 0 and i === count - 1)
+        // Gable-end vertical rake studs at exposed end trusses/rafters (trim bottom cleanly to host roof plane!)
         if ((i === 0 || i === count - 1) && seg.roofType === 'gable') {
           const gableStep = 16 * INCHES_TO_METERS
           for (let gz = -halfRun + gableStep; gz < halfRun - 0.15; gz += gableStep) {
             const studTopY = riseM * (1 - Math.abs(gz) / halfRun) - 0.06
-            if (studTopY > 0.22) {
-              pushStrut('lumber', toWorld(lx, 0.08, gz), toWorld(lx, studTopY, gz), 0.089, memberThickM, ridgeAxisWorld)
+            const studTopWorld = toWorld(lx, studTopY, gz)
+            const hostY = isOverFramed ? hostSurfaceYAt(studTopWorld[0], studTopWorld[2], hostRoofs) : null
+            const studBotLocalY = hostY !== null ? Math.max(0.08, hostY - seg.cy + 0.04) : 0.08
+            if (studTopY - studBotLocalY > 0.14) {
+              pushStrut('lumber', toWorld(lx, studBotLocalY, gz), studTopWorld, 0.089, memberThickM, ridgeAxisWorld)
             }
           }
         }
 
-        // Distributed H2.5A / H10A Galvanized Hurricane Ties at EVERY rafter/truss bearing seat!
+        // Distributed H2.5A / H10A Galvanized Hurricane Ties at wall bearing seats (skip mid-roof valley terminations!)
         if (showConnectors) {
-          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, -halfRun + 0.04), size: [0.058, 0.14, 0.06], rotY: seg.yaw })
-          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, halfRun - 0.04), size: [0.058, 0.14, 0.06], rotY: seg.yaw })
+          const pTieN = toWorld(lx, 0.02, -halfRun + 0.04)
+          const pTieS = toWorld(lx, 0.02, halfRun - 0.04)
+          if (clipN && (!isOverFramed || (!clipN.clippedEnd && isPointAboveHosts(pTieN, 0.06)))) {
+            boxes.push({ bucket: 'galv-steel', center: pTieN, size: [0.058, 0.14, 0.06], rotY: seg.yaw })
+          }
+          if (clipS && (!isOverFramed || (!clipS.clippedEnd && isPointAboveHosts(pTieS, 0.06)))) {
+            boxes.push({ bucket: 'galv-steel', center: pTieS, size: [0.058, 0.14, 0.06], rotY: seg.yaw })
+          }
         }
+      }
+
+      // Emit diagonal California Over-Frame Valley Sleepers / Valley Rafters joining the clipped jack rafters
+      // smoothly from the eave valley corner up to the ridge-to-host intersection point.
+      if (isOverFramed) {
+        const emitValleySleeper = (pts: Vec3Tuple[]) => {
+          if (pts.length === 0) return
+          const ordered: Vec3Tuple[] = [...pts]
+          if (ridgeClip.clippedStart) ordered.unshift(ridgeClip.start)
+          if (ridgeClip.clippedEnd) ordered.push(ridgeClip.end)
+          if (ordered.length < 2) return
+          const p0 = ordered[0]!
+          const p1 = ordered[ordered.length - 1]!
+          if (Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) >= 0.25) {
+            pushStrut('header-lvl', p0, p1, 0.14, 0.05, slopeAxisWorld)
+          }
+        }
+        emitValleySleeper(valleyPtsN)
+        emitValleySleeper(valleyPtsS)
       }
     }
   }
