@@ -2,5 +2,6 @@ node_modules/
 dist/
 assets/cad/*.glb
 .agent/
+task.md
 .DS_Store
 *.log

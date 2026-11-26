@@ -8,7 +8,7 @@
  * - IRC R602.7(1)/(2)/(3) exterior, interior-bearing, and porch headers + exact jack-stud counts
  * - Engineered wood & steel catalogs: LVL 2.0E, PSL 2.0E, LSL 1.55E, Glulam 24F-V4/V8,
  *   TJI I-joists (with web knockout rules), open-web floor & roof trusses, A992 Steel W-beams, A36 Flitch plates
- * - Simpson-class connector catalog (40 SKUs): hurricane ties, framing angles, face/top/sloped/heavy hangers,
+ * - Simpson-class connector catalog (47 SKUs): hurricane ties, framing angles, face/top/sloped/heavy hangers,
  *   post bases, post caps, hold-downs, straps, seismic plate washers, and anchor bolts
  * - IRC R302.11 fire blocking & R302.12 draftstopping rules and approved materials
  */
@@ -210,6 +210,37 @@ export const SPECIES_PROPERTIES: Readonly<Record<LumberSpecies, SpeciesPropertie
     specificGravity: 0.43,
     priceMultiplier: 1.04,
   },
+}
+
+/**
+ * NDS 2024 Supplement Table 4B size-specific Fb values (psi) for Southern Yellow Pine #2.
+ * Unlike Table 4A species (DF-L, SPF, Hem-Fir), SYP Table 4B already incorporates size adjustments
+ * so no separate Cf multiplier is applied on top.
+ */
+export const SYP_NO2_FB_BY_DEPTH_IN: Readonly<Record<'2x4' | '2x6' | '2x8' | '2x10' | '2x12', number>> = {
+  '2x4': 1100,
+  '2x6': 1000,
+  '2x8': 925,
+  '2x10': 800,
+  '2x12': 750,
+}
+
+/** NDS Table 4A bending size factor Cf for DF-L / SPF / Hem-Fir No. 2 dimension lumber. */
+export function getDimensionalCf(depthIn: number): number {
+  if (depthIn <= 4.0) return 1.5
+  if (depthIn <= 6.0) return 1.3
+  if (depthIn <= 8.0) return 1.2
+  if (depthIn <= 10.0) return 1.1
+  return 1.0
+}
+
+/** Resolve true size-specific NDS Table 4B Fb (psi) for Southern Yellow Pine #2 by dressed depth. */
+export function getSypNo2FbPsi(depthIn: number): number {
+  if (depthIn <= 4.0) return SYP_NO2_FB_BY_DEPTH_IN['2x4']
+  if (depthIn <= 6.0) return SYP_NO2_FB_BY_DEPTH_IN['2x6']
+  if (depthIn <= 8.0) return SYP_NO2_FB_BY_DEPTH_IN['2x8']
+  if (depthIn <= 10.0) return SYP_NO2_FB_BY_DEPTH_IN['2x10']
+  return SYP_NO2_FB_BY_DEPTH_IN['2x12']
 }
 
 /**
@@ -675,7 +706,7 @@ export const COLUMN_CATALOG: readonly ColumnCatalogEntry[] = [
 ]
 
 // ============================================================================
-// SIMPSON-CLASS METAL CONNECTOR & FASTENER CATALOG (40 SKUs)
+// SIMPSON-CLASS METAL CONNECTOR & FASTENER CATALOG (47 SKUs)
 // ============================================================================
 
 export type ConnectorCategory =
@@ -932,4 +963,31 @@ export function belongsToLevel(
     cur = parent
   }
   return false
+}
+
+/**
+ * Walk upward from `node` to resolve its enclosing `level` node ID (or fallback parentId
+ * if a test scene attaches nodes directly to a level ID string without an explicit level node).
+ */
+export function resolveNodeLevelId(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  node: SceneNodeLike,
+): string | null {
+  if (node.type === 'level') return node.id
+  let cur: SceneNodeLike | undefined = node
+  const seen = new Set<string>()
+  while (cur?.parentId && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    const parent: SceneNodeLike | undefined = nodes[cur.parentId]
+    if (!parent) return cur.parentId
+    if (parent.type === 'level') return parent.id
+    cur = parent
+  }
+  return typeof node.parentId === 'string' ? node.parentId : null
+}
+
+/** True when both nodes belong to the same level, or at least one is unscoped (flat single-level scene). */
+export function sameLevelOrUnscoped(levelA: string | null, levelB: string | null): boolean {
+  if (!levelA || !levelB) return true
+  return levelA === levelB
 }

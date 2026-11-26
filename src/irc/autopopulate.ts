@@ -206,7 +206,7 @@ export function autopopulateStructuralScene(
     const isShear = shearWallIds.has(wall.id)
     const isWet = nearPlumbing || inWetZone
     const studSize: StudSize = options.studSize ?? (isExterior || isWet || thick >= 0.13 ? '2x6' : '2x4')
-    if (isWet && thick < 0.13) wetWallUpgrades += 1
+    if (isWet && thick < 0.13 && studSize === '2x6') wetWallUpgrades += 1
 
     wallOverrides[wall.id] = {
       construction: isShear ? 'shear-wall' : 'wood-framed',
@@ -429,6 +429,7 @@ export function autopopulateStructuralScene(
         deadLoadPsf: design.floorDeadLoadPsf,
         snowLoadPsf: 0,
         species: design.species,
+        storiesSupported: design.storiesAbove,
         preferredFamily: options.preferredBeamFamily ?? cFloorSizing.recommendedGirder.entry.family,
       })
       const girderY = -((girderCheck.entry.depthIn * INCHES_TO_METERS) / 2)
@@ -565,7 +566,6 @@ export function autopopulateStructuralScene(
         design,
       })
       if (!cRoofSizing.needsStructuralRidgeBeam || !cRoofSizing.recommendedRidgeBeam) continue
-      const rb = cRoofSizing.recommendedRidgeBeam
       const runsAlongX = cluster.maxX - cluster.minX >= cluster.maxZ - cluster.minZ
       const rStart: Vec2 = runsAlongX
         ? [cluster.minX, (cluster.minZ + cluster.maxZ) / 2]
@@ -573,56 +573,105 @@ export function autopopulateStructuralScene(
       const rEnd: Vec2 = runsAlongX
         ? [cluster.maxX, (cluster.minZ + cluster.maxZ) / 2]
         : [(cluster.minX + cluster.maxX) / 2, cluster.maxZ]
-      const ridgeY = cluster.avgWallHeightM + (cShortFt / 2) * (roofPitchRise / 12) * FEET_TO_METERS
-      const ridgeId = nextId('strbm')
-
-      createdNodes.push({
-        id: ridgeId,
-        type: 'structural:beam',
-        name: `Structural Ridge Beam (${rb.entry.designation})`,
-        parentId: levelId,
-        start: rStart,
-        end: rEnd,
-        elevationY: Number(ridgeY.toFixed(3)),
+      const ridgeLenFt = Math.hypot(rEnd[0] - rStart[0], rEnd[1] - rStart[1]) * METERS_TO_FEET
+      const ridgeBays = Math.max(1, Math.ceil(ridgeLenFt / 20))
+      const ridgeBaySpanFt = ridgeLenFt / ridgeBays
+      const ridgeTribFt = Number((cShortFt / 2).toFixed(1))
+      const slopeSec = Math.hypot(1, roofPitchRise / 12)
+      const slopeDeadPsf = Number((design.roofDeadLoadPsf * slopeSec).toFixed(1))
+      const rb = sizeBeamOrHeader({
+        spanFt: ridgeBaySpanFt,
+        tributaryWidthFt: ridgeTribFt,
         role: 'ridge-beam',
-        beamType: rb.entry.family,
-        designation: rb.entry.designation,
-        plyCount: rb.entry.plyCount,
-        widthIn: rb.entry.widthIn,
-        depthIn: rb.entry.depthIn,
-        species: design.species,
-        mountStyle: 'flush',
-        tributaryWidthFt: Number((cShortFt / 2).toFixed(1)),
+        preferredFamily: options.preferredBeamFamily ?? (ridgeBaySpanFt > 14 ? 'glulam' : 'lvl'),
         liveLoadPsf: design.roofLiveLoadPsf,
-        deadLoadPsf: design.roofDeadLoadPsf,
         snowLoadPsf: design.groundSnowPsf,
-        bearingLengthIn: rb.requiredBearingIn,
-        jackStudsEachEnd: rb.jackStudsEachEnd,
-        endReactionLbs: rb.shearLbs,
+        deadLoadPsf: slopeDeadPsf,
+        species: design.species,
       })
 
-      // Ridge-beam bearing posts at both gable ends
-      const postSizing = sizeColumnAndFooting({
-        axialLoadLbs: rb.shearLbs,
-        unbracedHeightFt: ridgeY * METERS_TO_FEET,
-        soilBearingPsf: design.soilBearingPsf,
-        frostDepthIn: design.frostDepthIn,
-      })
-      for (const [idx, pt] of [rStart, rEnd].entries()) {
+      const ridgeY = cluster.avgWallHeightM + (cShortFt / 2) * (roofPitchRise / 12) * FEET_TO_METERS
+      const ridgeDepthM = rb.entry.depthIn * INCHES_TO_METERS
+      const ridgeBayIds: string[] = []
+
+      for (let b = 0; b < ridgeBays; b++) {
+        const t0 = b / ridgeBays
+        const t1 = (b + 1) / ridgeBays
+        const bStart: Vec2 = [
+          Number((rStart[0] + (rEnd[0] - rStart[0]) * t0).toFixed(4)),
+          Number((rStart[1] + (rEnd[1] - rStart[1]) * t0).toFixed(4)),
+        ]
+        const bEnd: Vec2 = [
+          Number((rStart[0] + (rEnd[0] - rStart[0]) * t1).toFixed(4)),
+          Number((rStart[1] + (rEnd[1] - rStart[1]) * t1).toFixed(4)),
+        ]
+        const ridgeId = nextId('strbm')
+        ridgeBayIds.push(ridgeId)
+
+        createdNodes.push({
+          id: ridgeId,
+          type: 'structural:beam',
+          name:
+            ridgeBays > 1
+              ? `Structural Ridge Beam #${b + 1} (${rb.entry.designation})`
+              : `Structural Ridge Beam (${rb.entry.designation})`,
+          parentId: levelId,
+          start: bStart,
+          end: bEnd,
+          elevationY: Number(ridgeY.toFixed(3)),
+          role: 'ridge-beam',
+          beamType: rb.entry.family,
+          designation: rb.entry.designation,
+          plyCount: rb.entry.plyCount,
+          widthIn: rb.entry.widthIn,
+          depthIn: rb.entry.depthIn,
+          species: design.species,
+          mountStyle: 'flush',
+          tributaryWidthFt: ridgeTribFt,
+          liveLoadPsf: design.roofLiveLoadPsf,
+          deadLoadPsf: slopeDeadPsf,
+          snowLoadPsf: design.groundSnowPsf,
+          bearingLengthIn: Math.max(3.5, Math.ceil(rb.requiredBearingIn * 2) / 2),
+          jackStudsEachEnd: rb.jackStudsEachEnd,
+          endReactionLbs: rb.shearLbs,
+        })
+      }
+
+      // Ridge-beam bearing posts at both gable ends + any intermediate bay splits (span > 20 ft)
+      const postHeightM = Number(Math.max(0.8, ridgeY - ridgeDepthM / 2).toFixed(3))
+      for (let p = 0; p <= ridgeBays; p++) {
+        const t = p / ridgeBays
+        const pt: Vec2 = [
+          Number((rStart[0] + (rEnd[0] - rStart[0]) * t).toFixed(4)),
+          Number((rStart[1] + (rEnd[1] - rStart[1]) * t).toFixed(4)),
+        ]
+        const isInterior = p > 0 && p < ridgeBays
+        const postAxialLbs = isInterior ? Math.round(rb.uniformLoadPlf * ridgeBaySpanFt) : rb.shearLbs
+        const postSizing = sizeColumnAndFooting({
+          axialLoadLbs: postAxialLbs,
+          unbracedHeightFt: postHeightM * METERS_TO_FEET,
+          preferredType: options.preferredColumnType,
+          soilBearingPsf: design.soilBearingPsf,
+          frostDepthIn: design.frostDepthIn,
+        })
         const colId = nextId('strcol')
+        const leftRidgeId = p > 0 ? ridgeBayIds[p - 1] : undefined
+        const rightRidgeId = p < ridgeBays ? ridgeBayIds[p] : undefined
+        const attachedRidgeIds = [leftRidgeId, rightRidgeId].filter((id): id is string => Boolean(id))
+
         createdNodes.push({
           id: colId,
           type: 'structural:column',
-          name: `Ridge Beam Bearing Post #${idx + 1} (${postSizing.entry.designation})`,
+          name: `Ridge Beam Bearing Post #${p + 1} (${postSizing.entry.designation})`,
           parentId: levelId,
           position: [pt[0], 0, pt[1]],
-          heightM: Number(ridgeY.toFixed(3)),
+          heightM: postHeightM,
           columnType: postSizing.entry.columnType,
           designation: postSizing.entry.designation,
           widthIn: postSizing.entry.widthIn,
           depthIn: postSizing.entry.depthIn,
-          axialLoadLbs: rb.shearLbs,
-          transfersFromNodeId: ridgeId,
+          axialLoadLbs: postAxialLbs,
+          transfersFromNodeId: attachedRidgeIds[0],
           transfersToNodeId: includeFoundation ? `footing:${colId}` : undefined,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? postSizing.footingWidthIn : 0,
@@ -631,8 +680,8 @@ export function autopopulateStructuralScene(
         })
         emitConnector({
           sku: postSizing.recommendedCapSku,
-          position: [pt[0], ridgeY - 0.15, pt[1]],
-          attachedNodeIds: [colId, ridgeId],
+          position: [pt[0], postHeightM, pt[1]],
+          attachedNodeIds: [colId, ...attachedRidgeIds],
         })
         if (includeFoundation) {
           emitConnector({

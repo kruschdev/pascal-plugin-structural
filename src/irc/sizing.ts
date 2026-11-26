@@ -29,6 +29,8 @@ import {
   TJI_IJOIST_CATALOG,
   type TjiIJoistEntry,
   getConnectorBySku,
+  getDimensionalCf,
+  getSypNo2FbPsi,
 } from './tables'
 
 export type BeamSizingInput = {
@@ -79,10 +81,18 @@ export function checkBeamEntry(
   const species = input.species ?? DEFAULT_DESIGN_PARAMS.species
   const sp = SPECIES_PROPERTIES[species]
 
-  // Adjust dimensional built-up catalog values (baselined to DF-L #2) for selected species
+  // Adjust dimensional built-up catalog values (baselined to DF-L #2 w/ NDS Table 4A Cf) for selected species.
+  // Southern Yellow Pine #2 uses NDS Table 4B size-specific Fb values (no separate Cf multiplier).
   const isDim = entry.family === 'dimensional-built-up'
   const dfl = SPECIES_PROPERTIES['df-l-2']
-  const fbScale = isDim ? sp.fbPsi / dfl.fbPsi : 1
+  const dflRefFb = entry.id.startsWith('custom-')
+    ? dfl.fbPsi
+    : dfl.fbPsi * getDimensionalCf(entry.depthIn)
+  const fbScale = isDim
+    ? species === 'syp-2'
+      ? getSypNo2FbPsi(entry.depthIn) / dflRefFb
+      : sp.fbPsi / dfl.fbPsi
+    : 1
   const fvScale = isDim ? sp.fvPsi / dfl.fvPsi : 1
   const eScale = isDim ? sp.ePsi / dfl.ePsi : 1
 
@@ -105,7 +115,9 @@ export function checkBeamEntry(
   } else {
     livePsf = (input.liveLoadPsf ?? 40) * (1 + stories * 0.85)
   }
-  const deadPsf = (input.deadLoadPsf ?? (isRoof ? 12 : 10)) * (1 + stories * 0.85)
+  const deadPsf = isRoof
+    ? (input.deadLoadPsf ?? 12)
+    : (input.deadLoadPsf ?? 10) * (1 + stories * 0.85)
   const tribFt = Math.max(1, input.tributaryWidthFt)
 
   const liveLoadPlf = livePsf * tribFt
@@ -175,7 +187,7 @@ export function checkBeamEntry(
     warnings.push(`Total-load deflection L/${Math.round(totalDeflectionRatio)} exceeds L/${totalLimitRatio} limit`)
   }
   if (entry.family === 'dimensional-built-up' && spanFt > 10) {
-    warnings.push('Exceeds 10 ft prescriptive built-up header range — consider LVL, Glulam, or PSL')
+    warnings.push('Exceeds 10 ft prescriptive built-up header range; consider LVL, Glulam, or PSL')
   }
 
   const maxUtil = Math.max(bendingUtilization, shearUtilization, liveDeflUtil, totalDeflUtil)
@@ -491,6 +503,7 @@ export type RoofSystemSizingResult = {
   actualHorizontalRunFt: number
   needsPurlinAndStruts: boolean
   needsStructuralRidgeBeam: boolean
+  ridgeBaysNeeded?: number
   recommendedRidgeBeam?: BeamCheckResult
   hurricaneTieSku: string
   gableClipSku: string
@@ -557,14 +570,18 @@ export function sizeRoofSystem(params: {
     params.system === 'ridge-beam-cathedral' || params.pitchRiseOver12 < 3
   const needsPurlinAndStruts = !needsStructuralRidgeBeam && halfSpanFt > maxRunFt
 
-  // Slope dead-load magnification sec(theta) = sqrt(1 + (pitch/12)^2) for sloped roofs
+  // Slope dead-load magnification sec(theta) = sqrt(1 + (pitch/12)^2) for sloped roofs.
+  // Split ridge spans > 20 ft into equal clear-span bays supported by intermediate ridge posts.
   const slopeSec = Math.hypot(1, params.pitchRiseOver12 / 12)
+  const ridgeBaysNeeded = needsStructuralRidgeBeam ? Math.max(1, Math.ceil(params.ridgeLengthFt / 20)) : 0
+  const ridgeBaySpanFt = ridgeBaysNeeded > 0 ? params.ridgeLengthFt / ridgeBaysNeeded : params.ridgeLengthFt
   const recommendedRidgeBeam = needsStructuralRidgeBeam
     ? sizeBeamOrHeader({
-        spanFt: Math.min(params.ridgeLengthFt, 20),
+        spanFt: ridgeBaySpanFt,
         tributaryWidthFt: halfSpanFt,
         role: 'ridge-beam',
-        preferredFamily: params.ridgeLengthFt > 14 ? 'glulam' : 'lvl',
+        preferredFamily: ridgeBaySpanFt > 14 ? 'glulam' : 'lvl',
+        liveLoadPsf: design.roofLiveLoadPsf,
         snowLoadPsf: design.groundSnowPsf,
         deadLoadPsf: Number((design.roofDeadLoadPsf * slopeSec).toFixed(1)),
         species: design.species,
@@ -581,6 +598,7 @@ export function sizeRoofSystem(params: {
     actualHorizontalRunFt: Number(halfSpanFt.toFixed(2)),
     needsPurlinAndStruts,
     needsStructuralRidgeBeam,
+    ridgeBaysNeeded,
     recommendedRidgeBeam,
     hurricaneTieSku,
     gableClipSku: design.windMph >= 130 ? 'HGA10' : 'A35',
