@@ -39,6 +39,9 @@ import {
   type SceneNodeLike,
   type Vec2,
   belongsToLevel,
+  isHighestWalledLevelInBuilding,
+  isLowestWalledLevelInBuilding,
+  levelSortOrder,
 } from '../irc/tables'
 
 type BucketId =
@@ -160,12 +163,6 @@ type ExtractedRoofSegment = {
   pitchRad: number
   overhangM: number
   wallHeightM: number
-}
-
-function levelSortOrder(level: SceneNodeLike): number {
-  if (typeof level.level === 'number' && Number.isFinite(level.level)) return level.level
-  if (typeof level.elevation === 'number' && Number.isFinite(level.elevation)) return level.elevation
-  return 0
 }
 
 function shouldAdoptWallLessRoofLevel(
@@ -440,7 +437,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     const spacingM = spacingIn * INCHES_TO_METERS
 
     // Foundation stem wall + continuous strip footing seated cleanly BELOW floor framing
-    if (showFoundation) {
+    // (only beneath the lowest walled story so upper floors never emit mid-air concrete footings)
+    if (showFoundation && isLowestWalledLevelInBuilding(nodes, levelId)) {
       const stemTopY = baseY - fdnTopOffset
       const stemH = 0.28
       const ftgH = 0.20
@@ -738,8 +736,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM)
 
     // Fallback when no roof-segment exists yet: synthesize gable roofs per transitively connected footprint cluster
-    // (never stretching a single floating roof across empty yard between detached rooms/structures!)
-    if (roofSegments.length === 0 && walls.length >= 2) {
+    // ONLY on the highest walled story (so lower floors of multi-story buildings never project a roof into the story above!)
+    if (roofSegments.length === 0 && walls.length >= 2 && isHighestWalledLevelInBuilding(nodes, levelId)) {
       const clusters = clusterLevelFootprints(nodes, levelId, 0.35)
       for (const env of clusters) {
         const spanX = env.maxX - env.minX

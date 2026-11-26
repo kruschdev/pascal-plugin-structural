@@ -529,16 +529,18 @@ export default function StructuralHostPanel() {
               <select
                 value={studSize}
                 onChange={(e) => setStudSize(e.target.value as UiStudSize)}
-                style={{ ...selectStyle, flex: 1 }}
+                title="Auto: 2x6 exterior & wet walls, 2x4 interior"
+                style={{ ...selectStyle, flex: '1 1 auto', minWidth: 0 }}
               >
-                <option value="auto">Auto (2x4/2x6)</option>
+                <option value="auto">Auto (2x4/6)</option>
                 <option value="2x4">2x4</option>
                 <option value="2x6">2x6</option>
               </select>
               <select
                 value={studSpacingIn}
                 onChange={(e) => setStudSpacingIn(Number(e.target.value) as StudSpacingIn)}
-                style={{ ...selectStyle, flex: 1 }}
+                title="Stud On-Center Spacing"
+                style={{ ...selectStyle, flex: '0 0 54px', width: 54 }}
               >
                 <option value={12}>12&quot;</option>
                 <option value={16}>16&quot;</option>

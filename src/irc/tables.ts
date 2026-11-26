@@ -991,3 +991,66 @@ export function sameLevelOrUnscoped(levelA: string | null, levelB: string | null
   if (!levelA || !levelB) return true
   return levelA === levelB
 }
+
+/** Sort key for ordering sibling building levels from lowest to highest story. */
+export function levelSortOrder(level: SceneNodeLike): number {
+  if (typeof level.level === 'number' && Number.isFinite(level.level)) return level.level
+  if (typeof level.elevation === 'number' && Number.isFinite(level.elevation)) return level.elevation
+  return 0
+}
+
+/**
+ * True when `levelId` is the highest walled story in its building (or unscoped / single-story).
+ * Lower stories beneath a higher walled story (e.g. Ground floor beneath Second floor) return false
+ * so fallback pitched roofs / attic ridge beams never pierce the living space of the story above.
+ */
+export function isHighestWalledLevelInBuilding(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null,
+): boolean {
+  if (!levelId) return true
+  const target = nodes[levelId]
+  if (!target || target.type !== 'level') return true
+  const targetOrder = levelSortOrder(target)
+  const targetParent = typeof target.parentId === 'string' ? target.parentId : null
+  const all = Object.values(nodes)
+  for (const n of all) {
+    if (n.type !== 'level' || n.id === levelId) continue
+    const nParent = typeof n.parentId === 'string' ? n.parentId : null
+    if (targetParent && nParent && nParent !== targetParent) continue
+    if (levelSortOrder(n) <= targetOrder) continue
+    const hasWalls = all.some(
+      (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id),
+    )
+    if (hasWalls) return false
+  }
+  return true
+}
+
+/**
+ * True when `levelId` is the lowest walled story in its building (or unscoped / single-story).
+ * Upper stories above a lower walled story return false so 3D concrete strip footings and stem
+ * walls only render beneath the lowest ground-contact story.
+ */
+export function isLowestWalledLevelInBuilding(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null,
+): boolean {
+  if (!levelId) return true
+  const target = nodes[levelId]
+  if (!target || target.type !== 'level') return true
+  const targetOrder = levelSortOrder(target)
+  const targetParent = typeof target.parentId === 'string' ? target.parentId : null
+  const all = Object.values(nodes)
+  for (const n of all) {
+    if (n.type !== 'level' || n.id === levelId) continue
+    const nParent = typeof n.parentId === 'string' ? n.parentId : null
+    if (targetParent && nParent && nParent !== targetParent) continue
+    if (levelSortOrder(n) >= targetOrder) continue
+    const hasWalls = all.some(
+      (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id),
+    )
+    if (hasWalls) return false
+  }
+  return true
+}

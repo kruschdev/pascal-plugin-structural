@@ -36,6 +36,7 @@ import {
   type WallOverrideRule,
   belongsToLevel,
   getConnectorBySku,
+  isHighestWalledLevelInBuilding,
 } from './tables'
 
 export type AutopopulateStructuralOptions = {
@@ -103,16 +104,15 @@ export function autopopulateStructuralScene(
   const studSpacingIn: StudSpacingIn = options.studSpacingIn ?? 16
   const floorSystem: FloorSystemKind = options.floorSystem ?? 'tji-ijoist'
   const roofSystem: RoofSystemKind = options.roofSystem ?? 'stick-rafter'
-  const includeRoof = options.includeRoof ?? true
-  const includeFoundation = options.includeFoundation ?? true
-  const includeFireblocking = options.includeFireblocking ?? true
-
   const levelNodes = Object.values(nodes).filter((n) => belongsToLevel(nodes, n, levelId))
   const walls = levelNodes.filter((n) => n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end))
   const slabs = levelNodes.filter((n) => n.type === 'slab' && Array.isArray(n.polygon) && n.polygon.length >= 3)
   const roofs = levelNodes.filter((n) => n.type === 'roof' || n.type === 'roof-segment')
   const zones = levelNodes.filter((n) => n.type === 'zone' || n.type === 'room')
   const plumbingFixtures = levelNodes.filter((n) => n.type === 'plumbing:fixture')
+  const includeRoof = options.includeRoof ?? (roofs.length > 0 || isHighestWalledLevelInBuilding(nodes, levelId))
+  const includeFoundation = options.includeFoundation ?? true
+  const includeFireblocking = options.includeFireblocking ?? true
 
   const createdNodes: SceneNodeLike[] = []
   let seq = 1
