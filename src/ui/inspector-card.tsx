@@ -21,6 +21,7 @@ import {
   type FirestopMaterial,
   METERS_TO_FEET,
   type SceneNodeLike,
+  type StructuralDesignParams,
   type Vec2,
   getConnectorBySku,
 } from '../irc/tables'
@@ -29,31 +30,23 @@ import { STRUCTURAL_SCHEDULE_VIEW_ID } from './structural-panel'
 
 export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
   const nodes = useScene((s) => s.nodes) as unknown as Readonly<Record<string, SceneNodeLike>>
-  const codeEdition = useStructuralUi((s) => s.codeEdition)
-  const species = useStructuralUi((s) => s.species)
-  const groundSnowPsf = useStructuralUi((s) => s.groundSnowPsf)
-  const windMph = useStructuralUi((s) => s.windMph)
-  const exposure = useStructuralUi((s) => s.exposure)
-  const seismicCategory = useStructuralUi((s) => s.seismicCategory)
-  const frostDepthIn = useStructuralUi((s) => s.frostDepthIn)
-  const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
+  const editedDesignParams = useStructuralUi((s) => s.editedDesignParams)
   const setActiveTab = useStructuralUi((s) => s.setActiveTab)
 
-  const design = useMemo(
-    () => ({
-      ...DEFAULT_DESIGN_PARAMS,
-      codeEdition,
-      species,
-      groundSnowPsf,
-      windMph,
-      exposure,
-      seismicCategory,
-      frostDepthIn,
-      soilBearingPsf,
-    }),
-    [codeEdition, species, groundSnowPsf, windMph, exposure, seismicCategory, frostDepthIn, soilBearingPsf],
+  const designOverride = useMemo(
+    () => (Object.keys(editedDesignParams).length > 0 ? editedDesignParams : undefined),
+    [editedDesignParams],
   )
-  const audit = useMemo(() => auditStructuralScene(nodes, design), [nodes, design])
+  const design = useMemo(() => {
+    const firstAssembly = Object.values(nodes).find((n) => n.type === 'structural:assembly')
+    const persisted = (firstAssembly?.designParams as Partial<StructuralDesignParams> | undefined) ?? {}
+    return {
+      ...DEFAULT_DESIGN_PARAMS,
+      ...persisted,
+      ...editedDesignParams,
+    }
+  }, [nodes, editedDesignParams])
+  const audit = useMemo(() => auditStructuralScene(nodes, designOverride), [nodes, designOverride])
 
   const raw = node as unknown as SceneNodeLike | undefined
   const nodeFindings = useMemo(
@@ -140,7 +133,10 @@ export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
           liveLoadPsf: typeof raw.liveLoadPsf === 'number' ? raw.liveLoadPsf : design.floorLiveLoadPsf,
           deadLoadPsf: typeof raw.deadLoadPsf === 'number' ? raw.deadLoadPsf : design.floorDeadLoadPsf,
           snowLoadPsf: typeof raw.snowLoadPsf === 'number' ? raw.snowLoadPsf : design.groundSnowPsf,
-          species: design.species,
+          species:
+            typeof raw.species === 'string'
+              ? (raw.species as StructuralDesignParams['species'])
+              : design.species,
           storiesSupported: design.storiesAbove,
         })
 

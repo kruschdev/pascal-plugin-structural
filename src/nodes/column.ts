@@ -71,10 +71,12 @@ export function buildStructuralColumnGeometry(
       depthIn: node.depthIn,
       heightM: node.heightM,
       includeFooting: node.footingWidthIn >= 18,
+      footingBelowGrade: true,
       footingWidthM: node.footingWidthIn * INCHES_TO_METERS,
       footingThicknessM: Math.max(0.2, node.footingDepthIn * INCHES_TO_METERS),
-      includeBaseHardware: true,
-      includeCapHardware: true,
+      // Post bases & caps are persisted as first-class `structural:connector` nodes (prevent double Z-fighting hardware)
+      includeBaseHardware: false,
+      includeCapHardware: false,
     }),
   )
   return group
@@ -85,22 +87,32 @@ export function buildStructuralColumnFloorplan(
   _ctx: GeometryContext,
 ): FloorplanGeometry {
   const [cx, , cz] = node.position
-  const half = Math.max(0.08, (node.widthIn * INCHES_TO_METERS) / 2)
+  const halfW = Math.max(0.03, (node.widthIn * INCHES_TO_METERS) / 2)
+  const halfD = Math.max(0.03, (node.depthIn * INCHES_TO_METERS) / 2)
+  const rot = typeof node.rotation === 'number' && Number.isFinite(node.rotation) ? node.rotation : 0
+  const cos = Math.cos(rot)
+  const sin = Math.sin(rot)
+  // Three.js Ry(rot): (lx, lz) -> (cx + lx*cos + lz*sin, cz - lx*sin + lz*cos)
+  const corner = (lx: number, lz: number): readonly [number, number] => [
+    cx + lx * cos + lz * sin,
+    cz - lx * sin + lz * cos,
+  ]
+  const p0 = corner(-halfW, -halfD)
+  const p1 = corner(halfW, -halfD)
+  const p2 = corner(halfW, halfD)
+  const p3 = corner(-halfW, halfD)
   const stroke = node.columnType.startsWith('steel') ? '#dc2626' : '#b45309'
   const children: FloorplanGeometry[] = [
     {
-      kind: 'rect',
-      x: cx - half,
-      y: cz - half,
-      width: half * 2,
-      height: half * 2,
+      kind: 'polygon',
+      points: [p0, p1, p2, p3],
       fill: stroke,
       fillOpacity: 0.25,
       stroke,
       strokeWidth: 0.025,
     },
-    { kind: 'line', x1: cx - half, y1: cz - half, x2: cx + half, y2: cz + half, stroke, strokeWidth: 0.02 },
-    { kind: 'line', x1: cx + half, y1: cz - half, x2: cx - half, y2: cz + half, stroke, strokeWidth: 0.02 },
+    { kind: 'line', x1: p0[0], y1: p0[1], x2: p2[0], y2: p2[1], stroke, strokeWidth: 0.02 },
+    { kind: 'line', x1: p1[0], y1: p1[1], x2: p3[0], y2: p3[1], stroke, strokeWidth: 0.02 },
   ]
   return { kind: 'group', children }
 }

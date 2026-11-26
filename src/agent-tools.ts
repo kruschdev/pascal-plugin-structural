@@ -123,6 +123,7 @@ export const structuralAgentTools: PluginAgentTools = {
         includeRoof: z.boolean().optional(),
         includeFoundation: z.boolean().optional(),
         includeFireblocking: z.boolean().optional(),
+        clearExisting: z.boolean().optional(),
         design: DesignParamsSchema,
       },
       annotations: { destructiveHint: false, idempotentHint: false },

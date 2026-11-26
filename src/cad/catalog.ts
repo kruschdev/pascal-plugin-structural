@@ -91,7 +91,7 @@ const colEntry = (
   category: 'Structural Columns & Footings',
   description,
   codeRef,
-  build: () => buildColumnCad({ columnId, includeFooting }),
+  build: () => buildColumnCad({ columnId, includeFooting, footingBelowGrade: false }),
 })
 
 const connEntry = (

@@ -313,6 +313,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   const showWalls = vis.walls !== false
   const showFloor = vis.floor !== false
   const showRoof = vis.roof !== false
+  const showBeams = vis.beams !== false
   const showFoundation = vis.foundation !== false
   const showConnectors = vis.connectors !== false
   const showFirestop = vis.firestop !== false
@@ -328,6 +329,23 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   const slabs = allLevelNodes.filter(
     (n) => n.type === 'slab' && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3,
   )
+  // Index persisted `structural:beam` headers & ridge beams so skeleton never double-draws Z-fighting copies
+  const levelBeams = allLevelNodes.filter((n) => n.type === 'structural:beam' && n.visible !== false)
+  const persistedHeaderOpeningIds = new Set<string>()
+  const persistedHeadersByWall = new Map<string, SceneNodeLike[]>()
+  const persistedRidgeBeams: SceneNodeLike[] = []
+  for (const b of levelBeams) {
+    if (b.role === 'header') {
+      if (typeof b.openingId === 'string' && b.openingId) persistedHeaderOpeningIds.add(b.openingId)
+      if (typeof b.hostWallId === 'string' && b.hostWallId) {
+        const arr = persistedHeadersByWall.get(b.hostWallId)
+        if (arr) arr.push(b)
+        else persistedHeadersByWall.set(b.hostWallId, [b])
+      }
+    } else if (b.role === 'ridge-beam') {
+      persistedRidgeBeams.push(b)
+    }
+  }
   const levelNode = levelId ? nodes[levelId] : undefined
   const defaultWallHeightM =
     typeof levelNode?.height === 'number' && levelNode.height > 1.5
@@ -535,7 +553,23 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       }
 
       const headerSpanM = uRight - uLeft + STUD_THICK_M * jacksEachEnd * 2
-      pushWallBox('header-lvl', sx, sz, ux, uz, nx, nz, rotY, (uLeft + uRight) / 2, headerBotY + actualHeaderH / 2, headerSpanM, actualHeaderH, studDepthM + 0.004)
+      const opMidWorld = worldOnWall(sx, sz, ux, uz, nx, nz, (uLeft + uRight) / 2, headerBotY + actualHeaderH / 2)
+      const wallPersistedHeaders = persistedHeadersByWall.get(wall.id)
+      const hasPersistedHeader =
+        persistedHeaderOpeningIds.has(op.id) ||
+        Boolean(
+          wallPersistedHeaders?.some((hb) => {
+            const bs = hb.start as Vec2 | undefined
+            const be = hb.end as Vec2 | undefined
+            if (!Array.isArray(bs) || !Array.isArray(be)) return false
+            const bmx = (bs[0] + be[0]) / 2
+            const bmz = (bs[1] + be[1]) / 2
+            return Math.hypot(bmx - opMidWorld[0], bmz - opMidWorld[2]) <= 0.45
+          }),
+        )
+      if (showBeams && !hasPersistedHeader) {
+        pushWallBox('header-lvl', sx, sz, ux, uz, nx, nz, rotY, (uLeft + uRight) / 2, headerBotY + actualHeaderH / 2, headerSpanM, actualHeaderH, studDepthM + 0.004)
+      }
 
       if (showConnectors && op.widthM >= 1.2) {
         pushWallBox('galv-steel', sx, sz, ux, uz, nx, nz, rotY, uLeft, headerBotY + actualHeaderH * 0.4, 0.055, actualHeaderH * 0.75, studDepthM + 0.016)
@@ -771,11 +805,20 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       const ridgeHalfThick = isTruss ? 0 : 0.0445 // rafters butt cleanly against ridge beam face
       const eaveDropY = seg.overhangM * slopeTan
 
-      // Structural LVL / Glulam Ridge Beam (for stick rafters & cathedral)
-      if (!isTruss) {
+      // Structural LVL / Glulam Ridge Beam (for stick rafters & cathedral), honoring vis.beams & avoiding duplicates with persisted ridge beams
+      const ridgeCenterWorld = toWorld(0, riseM - 0.09, 0)
+      const hasPersistedRidge = persistedRidgeBeams.some((rb) => {
+        const bs = rb.start as Vec2 | undefined
+        const be = rb.end as Vec2 | undefined
+        if (!Array.isArray(bs) || !Array.isArray(be)) return false
+        const bmx = (bs[0] + be[0]) / 2
+        const bmz = (bs[1] + be[1]) / 2
+        return Math.hypot(bmx - ridgeCenterWorld[0], bmz - ridgeCenterWorld[2]) <= Math.max(seg.widthM * 0.6, 1.5)
+      })
+      if (!isTruss && showBeams && !hasPersistedRidge) {
         boxes.push({
           bucket: 'header-lvl',
-          center: toWorld(0, riseM - 0.09, 0),
+          center: ridgeCenterWorld,
           size: [seg.widthM, 0.24, 0.089],
           rotY: seg.yaw,
         })
@@ -891,6 +934,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     inst.name = `structural-skeleton-${bucketId}`
     inst.castShadow = bucketId !== 'concrete'
     inst.receiveShadow = true
+    // Make decorative skeleton framing non-blocking to pointer raycasts so clicks reach selectable scene nodes
+    inst.raycast = () => {}
     for (let i = 0; i < list.length; i++) {
       const m = list[i]!
       pos.set(m.center[0], m.center[1], m.center[2])

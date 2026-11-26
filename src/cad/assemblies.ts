@@ -26,7 +26,7 @@ import {
   type LumberSpecies,
 } from '../irc/tables'
 import { buildBeamCad, buildIJoistCad, buildTrussCad } from './beams'
-import { buildConnectorCad } from './connectors'
+import { buildConnectorCad, getPostCapSeatOffsetM } from './connectors'
 import {
   createStructuralMaterialPool,
   firestopMaterialForKind,
@@ -46,6 +46,8 @@ export type ColumnCadOptions = {
   heightM?: number
   /** Include poured concrete spread pad footing underneath (default false) */
   includeFooting?: boolean
+  /** When true (default), place footing + pier below y = 0 so column shaft starts at y = 0. Set false for grounded catalog displays. */
+  footingBelowGrade?: boolean
   footingWidthM?: number
   footingThicknessM?: number
   /** Attach Simpson-class base connector at bottom of column (default true) */
@@ -63,10 +65,14 @@ export type FirestopCadOptions = {
   material?: FirestopMaterial
   /** Overall bay/assembly width in meters */
   widthM?: number
+  /** Vertical height in meters (honored in live mode) */
+  heightM?: number
   /** Overall framing cavity depth in meters (default 3.5 in or 5.5 in) */
   depthM?: number
   /** Pipe outer diameter in meters for `'penetration-firestop'` (default 3.5 in = 3" Sch 40 PVC OD) */
   pipeOdM?: number
+  /** `'live'` builds clean proportional geometry honoring widthM/heightM/depthM; `'cutaway'` (default) builds demo catalog assemblies. */
+  mode?: 'live' | 'cutaway'
   pool?: StructuralMaterialPool
 }
 
@@ -98,10 +104,13 @@ export function buildColumnCad(options: ColumnCadOptions = {}): Group {
     : undefined
 
   const colType: ColumnType = options.columnType ?? entry?.columnType ?? 'wood-solid'
-  const widthM = (options.widthIn ?? entry?.widthIn ?? 5.5) * INCHES_TO_METERS
-  const depthM = (options.depthIn ?? entry?.depthIn ?? 5.5) * INCHES_TO_METERS
+  const effWidthIn = options.widthIn ?? entry?.widthIn ?? 5.5
+  const effDepthIn = options.depthIn ?? entry?.depthIn ?? 5.5
+  const widthM = effWidthIn * INCHES_TO_METERS
+  const depthM = effDepthIn * INCHES_TO_METERS
   const heightM = options.heightM ?? 8 * FEET_TO_METERS
   const includeFooting = options.includeFooting ?? false
+  const footingBelowGrade = options.footingBelowGrade ?? true
   const footingW = options.footingWidthM ?? Math.max(0.61, widthM * 4.5)
   const footingT = options.footingThicknessM ?? 0.254 // 10" concrete pad footing
   const includeBase = options.includeBaseHardware ?? true
@@ -113,17 +122,36 @@ export function buildColumnCad(options: ColumnCadOptions = {}): Group {
 
   let yBase = 0
   if (includeFooting) {
-    // Concrete spread pad footing resting on y = 0 + raised grout pedestal collar
-    addMesh(g, new Mesh(new BoxGeometry(footingW, footingT, footingW), pool.concrete), 0, footingT / 2, 0)
     const pierW = Math.max(widthM + 0.14, 0.28)
     const pierH = 0.08
-    addMesh(g, new Mesh(new BoxGeometry(pierW, pierH, pierW), pool.concrete), 0, footingT + pierH / 2, 0)
-    yBase = footingT + pierH
+    if (footingBelowGrade) {
+      // Spread pad footing + grout pedestal placed below y = 0 so column shaft starts cleanly at y = 0
+      addMesh(g, new Mesh(new BoxGeometry(footingW, footingT, footingW), pool.concrete), 0, -(pierH + footingT / 2), 0)
+      addMesh(g, new Mesh(new BoxGeometry(pierW, pierH, pierW), pool.concrete), 0, -pierH / 2, 0)
+      yBase = 0
+    } else {
+      // Concrete spread pad footing resting on y = 0 + raised grout pedestal collar (grounded catalog display)
+      addMesh(g, new Mesh(new BoxGeometry(footingW, footingT, footingW), pool.concrete), 0, footingT / 2, 0)
+      addMesh(g, new Mesh(new BoxGeometry(pierW, pierH, pierW), pool.concrete), 0, footingT + pierH / 2, 0)
+      yBase = footingT + pierH
+    }
   }
 
-  // Optional standoff offset when ABU post base is present on wood columns
-  const baseSku = options.baseSku ?? entry?.recommendedBaseSku ?? 'ABU66Z'
-  const capSku = options.capSku ?? entry?.recommendedCapSku ?? 'CCQ66'
+  // Size-matched default Simpson-class hardware SKUs when caller omits explicit SKUs
+  const defaultBaseSku =
+    effWidthIn <= 3.75 && effDepthIn <= 3.75
+      ? 'ABU44Z'
+      : effWidthIn <= 3.75 && effDepthIn > 4.5
+        ? 'ABU46Z'
+        : 'ABU66Z'
+  const defaultCapSku =
+    effWidthIn <= 3.75 && effDepthIn <= 3.75
+      ? 'BC4'
+      : effWidthIn <= 3.75 && effDepthIn > 4.5
+        ? 'CCQ46'
+        : 'CCQ66'
+  const baseSku = options.baseSku ?? entry?.recommendedBaseSku ?? defaultBaseSku
+  const capSku = options.capSku ?? entry?.recommendedCapSku ?? defaultCapSku
   const isWood =
     colType === 'wood-solid' ||
     colType === 'wood-built-up' ||
@@ -310,7 +338,8 @@ export function buildColumnCad(options: ColumnCadOptions = {}): Group {
   }
   if (isWood && includeCap) {
     const capConn = buildConnectorCad({ sku: capSku, pool })
-    capConn.position.set(0, shaftY0 + shaftH - 0.085, 0)
+    // Seat the cap horizontal bearing plate underside flush on top of the column shaft (shaftY0 + shaftH, 0 mm float)
+    capConn.position.set(0, shaftY0 + shaftH - getPostCapSeatOffsetM(capSku), 0)
     g.add(capConn)
   }
 
@@ -334,6 +363,73 @@ export function buildFirestopCad(options: FirestopCadOptions): Group {
   const studT = 1.5 * INCHES_TO_METERS
   const bayW = options.widthM ?? 16 * INCHES_TO_METERS
   const cavD = options.depthM ?? 5.5 * INCHES_TO_METERS
+
+  // Live scene mode: build clean proportional firestop/draftstop geometry honoring exact widthM, heightM, depthM
+  // (keeps demo framing cutaways strictly in the standalone CAD catalog .glb exports).
+  if (options.mode === 'live') {
+    const liveW = Math.max(0.06, options.widthM ?? 1.0)
+    const liveH = Math.max(0.03, options.heightM ?? 0.3)
+    const liveD = Math.max(0.01, options.depthM ?? 0.089)
+
+    if (firestopKind === 'penetration-firestop') {
+      const collarOuterR = Math.max(0.03, Math.min(liveW, liveD) / 2)
+      const innerR = Math.max(0.015, collarOuterR * 0.72)
+      addMesh(
+        g,
+        new Mesh(new CylinderGeometry(collarOuterR, collarOuterR, liveH, 20), pool.firestopIntumescentRed),
+        0,
+        liveH / 2,
+        0,
+      )
+      addMesh(
+        g,
+        new Mesh(new CylinderGeometry(innerR, innerR, liveH + 0.002, 20), pool.steelMillDark),
+        0,
+        liveH / 2,
+        0,
+      )
+      return g
+    }
+
+    if (firestopKind === 'attic-draftstop') {
+      const tri = new Shape()
+      tri.moveTo(-liveW / 2, 0)
+      tri.lineTo(liveW / 2, 0)
+      tri.lineTo(0, liveH)
+      tri.closePath()
+      const triGeo = new ExtrudeGeometry(tri, { depth: liveD, bevelEnabled: false })
+      triGeo.translate(0, 0, -liveD / 2)
+      addMesh(g, new Mesh(triGeo, fsMat), 0, 0, 0)
+      return g
+    }
+
+    // Proportional firestop/draftstop block (wall, soffit, stair, chase, floor-draftstop)
+    if (firestopKind === 'chase-chimney-shaft') {
+      // Stack mineral-wool / gypsum shaft block cleanly above the bottom galvanized retaining plate (zero coplanar Z-fighting)
+      const plateH = Math.min(0.004, liveH * 0.1)
+      const blockH = Math.max(0.005, liveH - plateH)
+      addMesh(
+        g,
+        new Mesh(new BoxGeometry(liveW + 0.002, plateH, liveD + 0.002), pool.galvanizedSteel),
+        0,
+        plateH / 2,
+        0,
+      )
+      addMesh(g, new Mesh(new BoxGeometry(liveW, blockH, liveD), fsMat), 0, plateH + blockH / 2, 0)
+    } else {
+      addMesh(g, new Mesh(new BoxGeometry(liveW, liveH, liveD), fsMat), 0, liveH / 2, 0)
+      // Subtle red code-compliance inspection band inset along the outer face
+      const stripeH = Math.min(0.012, liveH * 0.25)
+      addMesh(
+        g,
+        new Mesh(new BoxGeometry(liveW, stripeH, liveD + 0.001), pool.firestopIntumescentRed),
+        0,
+        liveH / 2,
+        0,
+      )
+    }
+    return g
+  }
 
   switch (firestopKind) {
     case 'wall-vertical-10ft':
@@ -904,6 +1000,7 @@ export function buildAssemblyPreviewCad(options: AssemblyPreviewCadOptions): Gro
         columnId: 'col-6x6-dfl',
         heightM: 1.05,
         includeFooting: true,
+        footingBelowGrade: false,
         footingWidthM: 0.66,
         footingThicknessM: 0.22,
         includeBaseHardware: true,

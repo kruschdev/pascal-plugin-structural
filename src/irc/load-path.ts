@@ -13,6 +13,8 @@ import {
   type Vec2,
   belongsToLevel,
   getRequiredBracedWallPercent,
+  resolveNodeLevelId,
+  sameLevelOrUnscoped,
 } from './tables'
 
 export type BracedWallLineReport = {
@@ -58,6 +60,27 @@ function getWallLengthM(w: SceneNodeLike): number {
   return Math.hypot(w.end[0] - w.start[0], w.end[1] - w.start[1])
 }
 
+/** Merge overlapping or touching 1D intervals `[a, b]` so parallel walls in the same BWL never double-count. */
+function mergeIntervals1D(intervals: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  if (intervals.length === 0) return []
+  const sorted = intervals
+    .map(([a, b]) => (a <= b ? ([a, b] as [number, number]) : ([b, a] as [number, number])))
+    .filter(([a, b]) => b > a + 1e-6)
+    .sort((x, y) => x[0] - y[0])
+  if (sorted.length === 0) return []
+  const merged: Array<[number, number]> = [[sorted[0]![0], sorted[0]![1]]]
+  for (let i = 1; i < sorted.length; i++) {
+    const [s, e] = sorted[i]!
+    const prev = merged[merged.length - 1]!
+    if (s <= prev[1] + 1e-6) {
+      prev[1] = Math.max(prev[1], e)
+    } else {
+      merged.push([s, e])
+    }
+  }
+  return merged
+}
+
 /**
  * Evaluate IRC R602.10 Braced Wall Lines along both X and Z axes, scoped by level.
  * Clusters walls within 4 ft (1.2192 m) perpendicular tolerance (R602.10.1.1) and measures
@@ -91,8 +114,8 @@ export function evaluateBracedWallLines(params: {
     projMinM: number
     projMaxM: number
     lenM: number
-    wspBracedLenM: number
-    portalPanelLensM: number[]
+    wspIntervalsM: Array<[number, number]>
+    portalIntervalsM: Array<[number, number]>
   }
 
   const entries: WallEntry[] = []
@@ -108,6 +131,9 @@ export function evaluateBracedWallLines(params: {
     const offsetM = axis === 'X' ? (start[1] + end[1]) / 2 : (start[0] + end[0]) / 2
     const projMinM = axis === 'X' ? Math.min(start[0], end[0]) : Math.min(start[1], end[1])
     const projMaxM = axis === 'X' ? Math.max(start[0], end[0]) : Math.max(start[1], end[1])
+    const ux = (end[0] - start[0]) / lenM
+    const uz = (end[1] - start[1]) / lenM
+    const projAt = (u: number): number => (axis === 'X' ? start[0] + ux * u : start[1] + uz * u)
 
     // Split wall into real continuous solid pier intervals around child doors/windows (both native & Pascal `item` openings)
     const childOpenings = extractWallOpenings(params.nodes, w)
@@ -116,31 +142,43 @@ export function evaluateBracedWallLines(params: {
       Math.min(lenM, o.uCenterM + o.widthM / 2),
     ])
     cuts.sort((a, b) => a[0] - b[0])
-    const solidSpans: number[] = []
+    const solidRanges: Array<[number, number]> = []
     let cursor = 0
     for (const [c0, c1] of cuts) {
-      if (c0 > cursor) solidSpans.push(c0 - cursor)
+      if (c0 > cursor) solidRanges.push([cursor, c0])
       cursor = Math.max(cursor, c1)
     }
-    if (cursor < lenM) solidSpans.push(lenM - cursor)
+    if (cursor < lenM) solidRanges.push([cursor, lenM])
 
     const wallHeightM = typeof w.height === 'number' && w.height > 0 ? w.height : 2.7432
-    const wspBracedLenM = solidSpans.reduce((s, seg) => s + (seg >= 1.2192 ? seg : 0), 0)
+    const toProjInterval = ([u0, u1]: readonly [number, number]): [number, number] => {
+      const p0 = projAt(u0)
+      const p1 = projAt(u1)
+      return p0 <= p1 ? [p0, p1] : [p1, p0]
+    }
+    const wspIntervalsM: Array<[number, number]> = solidRanges
+      .filter(([u0, u1]) => u1 - u0 >= 1.2192)
+      .map(toProjInterval)
     // IRC Table R602.10.5 / R602.10.6.4: CS-PF portal frames apply only adjacent to openings on walls <= 10 ft (3.05 m)
-    const portalPanelLensM =
+    const portalIntervalsM: Array<[number, number]> =
       childOpenings.length > 0 && wallHeightM <= 3.06 && design.storiesAbove <= 1
-        ? solidSpans.filter((seg) => seg >= 0.4064 && seg < 1.2192)
+        ? solidRanges
+            .filter(([u0, u1]) => {
+              const seg = u1 - u0
+              return seg >= 0.4064 && seg < 1.2192
+            })
+            .map(toProjInterval)
         : []
     entries.push({
       wall: w,
-      levelKey: w.parentId ?? 'default',
+      levelKey: resolveNodeLevelId(params.nodes, w) ?? 'default',
       axis,
       offsetM,
       projMinM,
       projMaxM,
       lenM,
-      wspBracedLenM,
-      portalPanelLensM,
+      wspIntervalsM,
+      portalIntervalsM,
     })
   }
 
@@ -164,28 +202,32 @@ export function evaluateBracedWallLines(params: {
       }
 
       clusters.forEach((cluster, idx) => {
-        // IRC R602.10.1.2: BWL length is out-to-out distance between extreme ends along the axis
+        // IRC R602.10.1.2: BWL length is axis-projected out-to-out distance between extreme ends
         const minProj = cluster.reduce((m, e) => Math.min(m, e.projMinM), Number.POSITIVE_INFINITY)
         const maxProj = cluster.reduce((m, e) => Math.max(m, e.projMaxM), Number.NEGATIVE_INFINITY)
-        const maxWallM = cluster.reduce((m, e) => Math.max(m, e.lenM), 0)
-        const totalM = Math.max(maxWallM, maxProj - minProj)
-        const wspM = cluster.reduce((s, e) => s + e.wspBracedLenM, 0)
+        const totalM = maxProj - minProj
+        if (!Number.isFinite(totalM) || totalM <= 1e-6) return
+        // Merge overlapping 1D projected intervals so parallel hallway/closet walls never exceed 100%
+        const mergedWsp = mergeIntervals1D(cluster.flatMap((e) => e.wspIntervalsM))
+        const wspM = Math.min(totalM, mergedWsp.reduce((s, [a, b]) => s + (b - a), 0))
         // IRC Table R602.10.5 limits CS-PF portal frames to at most 4 panels per braced wall line
-        const allPortalPanels = cluster
-          .flatMap((e) => e.portalPanelLensM)
-          .sort((a, b) => b - a)
+        const allPortalIntervals = cluster
+          .flatMap((e) => e.portalIntervalsM)
+          .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0]))
           .slice(0, 4)
-        const portalExtraM = allPortalPanels.reduce((s, p) => s + p, 0)
+        const mergedWithPortals = mergeIntervals1D([...mergedWsp, ...allPortalIntervals])
+        const totalWithPortalsM = Math.min(totalM, mergedWithPortals.reduce((s, [a, b]) => s + (b - a), 0))
+        const portalExtraM = Math.max(0, totalWithPortalsM - wspM)
         const totalFt = totalM * METERS_TO_FEET
         const wspFt = wspM * METERS_TO_FEET
         const portalFt = (wspM + portalExtraM) * METERS_TO_FEET
-        const wspPercent = totalFt > 0 ? Math.round((wspFt / totalFt) * 100) : 0
+        const wspPercent = totalFt > 0 ? Math.min(100, Math.round((wspFt / totalFt) * 100)) : 0
         const highLateral = design.windMph >= 130 || requiresPlateWashers
 
         // Credit WSP piers (>=48") by default; only credit up to 4 CS-PF (16"-48") portal frames when adjacent to openings
         const usesPortal = wspPercent < requiredPercent && portalExtraM > 0
         const bracedFt = usesPortal ? portalFt : wspFt
-        const providedPercent = totalFt > 0 ? Math.round((bracedFt / totalFt) * 100) : 0
+        const providedPercent = totalFt > 0 ? Math.min(100, Math.round((bracedFt / totalFt) * 100)) : 0
         const passes = providedPercent >= requiredPercent
 
         let bracingMethod: BracedWallLineReport['bracingMethod'] = 'WSP'
@@ -240,7 +282,7 @@ export function evaluateBracedWallLines(params: {
                 : 'IRC Table R602.10.3(1)/(3)',
           note: passes
             ? undefined
-            : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}% — add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
+            : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}%; add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
         })
       })
     }
@@ -265,12 +307,20 @@ export function traceStructuralLoadPaths(params: {
   const assemblies = all.filter((n) => n.type === 'structural:assembly')
   const walls = all.filter((n) => n.type === 'wall' && getWallLengthM(n) > 0)
 
-  const hasTji = assemblies.some((a) => a.floorSystem === 'tji-ijoist')
+  // Scope TJI floor checks strictly per level so a TJI floor on Level 1 never requires squash blocks on Level 2
+  const levelHasTji = (node: SceneNodeLike): boolean => {
+    const nodeLvl = resolveNodeLevelId(params.nodes, node)
+    const matching = nodeLvl
+      ? assemblies.filter((a) => sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, a), nodeLvl))
+      : assemblies
+    return matching.some((a) => a.floorSystem === 'tji-ijoist')
+  }
   const gravityLinks: LoadPathNodeLink[] = []
   const SUPPORT_TOL_M = 0.45
 
   // 1. Check every beam's end bearing onto a column or bearing wall
   for (const beam of beams) {
+    const beamLvl = resolveNodeLevelId(params.nodes, beam)
     const start = (beam.start as Vec2 | undefined) ?? [0, 0]
     const end = (beam.end as Vec2 | undefined) ?? [1, 0]
     const role = String(beam.role ?? 'header')
@@ -290,7 +340,7 @@ export function traceStructuralLoadPaths(params: {
     for (const [endIdx, pt] of [start, end].entries()) {
       // Check if a column sits near this beam end AND reaches up to support the beam underside (same level/vertical alignment)
       const col = columns.find((c) => {
-        if (beam.parentId && c.parentId && c.parentId !== beam.parentId) return false
+        if (!sameLevelOrUnscoped(beamLvl, resolveNodeLevelId(params.nodes, c))) return false
         const p = c.position ?? [0, 0, 0]
         const colH = typeof c.heightM === 'number' ? c.heightM : 2.74
         const colTopY = p[1] + colH
@@ -299,6 +349,7 @@ export function traceStructuralLoadPaths(params: {
         return planMatch && verticalMatch
       })
       if (col) {
+        const colNeedsTjiSquash = levelHasTji(col) && !col.hasSquashBlocks
         gravityLinks.push({
           fromNodeId: beam.id,
           fromType: `beam (${role})`,
@@ -307,18 +358,17 @@ export function traceStructuralLoadPaths(params: {
           position: pt,
           axialLoadLbs: reactionLbs,
           continuous: true,
-          requiresSquashBlock: hasTji && !col.hasSquashBlocks,
-          issue:
-            hasTji && !col.hasSquashBlocks
-              ? `Column ${col.id} supports beam ${beam.id} over TJI floor without squash blocks (IRC R502.1.2)`
-              : undefined,
+          requiresSquashBlock: colNeedsTjiSquash,
+          issue: colNeedsTjiSquash
+            ? `Column ${col.id} supports beam ${beam.id} over TJI floor without squash blocks (IRC R502.1.2)`
+            : undefined,
         })
         continue
       }
 
       // Check if beam end bears on a wall on the same level
       const wall = walls.find((w) => {
-        if (beam.parentId && w.parentId && w.parentId !== beam.parentId) return false
+        if (!sameLevelOrUnscoped(beamLvl, resolveNodeLevelId(params.nodes, w))) return false
         const ws = w.start!
         const we = w.end!
         const len = Math.hypot(we[0] - ws[0], we[1] - ws[1])
@@ -363,27 +413,28 @@ export function traceStructuralLoadPaths(params: {
     const load = typeof col.axialLoadLbs === 'number' ? col.axialLoadLbs : 4500
     const hasFooting = typeof col.footingWidthIn === 'number' && col.footingWidthIn >= 18
     const targetId = typeof col.transfersToNodeId === 'string' ? col.transfersToNodeId : ''
-    const hasVerifiedTarget =
-      targetId.startsWith('footing:')
-        ? hasFooting
-        : Boolean(targetId && params.nodes[targetId])
+    const isFootingTarget = targetId.startsWith('footing_') || targetId.startsWith('footing:')
+    const hasVerifiedTarget = isFootingTarget
+      ? hasFooting
+      : Boolean(targetId && params.nodes[targetId])
     const continuous = hasFooting || hasVerifiedTarget
     gravityLinks.push({
       fromNodeId: col.id,
       fromType: 'column',
-      toNodeId: hasVerifiedTarget ? targetId : hasFooting ? `footing:${col.id}` : null,
-      toType: hasVerifiedTarget && !targetId.startsWith('footing:')
-        ? 'lower-column'
-        : hasFooting
-          ? 'pad-footing'
-          : 'missing-footing',
+      toNodeId: hasVerifiedTarget ? targetId : hasFooting ? `footing_${col.id}` : null,
+      toType:
+        hasVerifiedTarget && !isFootingTarget
+          ? 'lower-column'
+          : hasFooting
+            ? 'pad-footing'
+            : 'missing-footing',
       position: [pos[0], pos[2]],
       axialLoadLbs: load,
       continuous,
-      requiresSquashBlock: hasTji && !col.hasSquashBlocks,
+      requiresSquashBlock: levelHasTji(col) && !col.hasSquashBlocks,
       issue: continuous
         ? undefined
-        : targetId && !targetId.startsWith('footing:') && !params.nodes[targetId]
+        : targetId && !isFootingTarget && !params.nodes[targetId]
           ? `Column ${col.id} references missing target "${targetId}" with no spread footing (broken load path, IRC R403.1).`
           : `Column ${col.id} (${load} lbs) lacks a foundation pad footing or stacked lower column (IRC R403.1).`,
     })
@@ -410,25 +461,51 @@ export function traceStructuralLoadPaths(params: {
     upliftFindings.push(`SDC ${design.seismicCategory} / ${design.windMph} mph wind requires foundation hold-downs (HDU/STHD14).`)
   }
 
-  // Verify each individual column has a post base and (when supporting a beam) a post cap
+  // Verify each individual column has a post base (when on a foundation footing) and (when supporting a beam on the same level) a post cap
   const baseConnectors = connectors.filter((c) => c.category === 'post-base')
   const capConnectors = connectors.filter((c) => c.category === 'post-cap')
   const missingBases: string[] = []
   const missingCaps: string[] = []
   for (const col of columns) {
+    const colLvl = resolveNodeLevelId(params.nodes, col)
     const cPos = col.position ?? [0, 0, 0]
-    const hasBase = baseConnectors.some(
-      (b) =>
-        (Array.isArray(b.attachedNodeIds) && b.attachedNodeIds.includes(col.id)) ||
-        (Array.isArray(b.position) && Math.hypot(b.position[0] - cPos[0], b.position[2] - cPos[2]) <= 0.45),
+    const targetId = typeof col.transfersToNodeId === 'string' ? col.transfersToNodeId : ''
+    const stacksOntoLowerCol = Boolean(
+      targetId &&
+        targetId !== col.id &&
+        !targetId.startsWith('footing_') &&
+        !targetId.startsWith('footing:') &&
+        params.nodes[targetId]?.type === 'structural:column',
     )
-    if (!hasBase) missingBases.push(col.id)
-    if (beams.length > 0) {
-      const hasCap = capConnectors.some(
-        (cap) =>
+    const lvlAsm = colLvl
+      ? assemblies.find((a) => resolveNodeLevelId(params.nodes, a) === colLvl)
+      : assemblies[0]
+    const levelFoundationDisabled =
+      lvlAsm !== undefined &&
+      (lvlAsm.visibleSystems as Record<string, boolean> | undefined)?.foundation === false &&
+      (typeof col.footingWidthIn !== 'number' || col.footingWidthIn <= 0)
+    const needsFoundationBase = !stacksOntoLowerCol && !levelFoundationDisabled
+
+    if (needsFoundationBase) {
+      const hasBase = baseConnectors.some((b) => {
+        if (!sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, b), colLvl)) return false
+        return (
+          (Array.isArray(b.attachedNodeIds) && b.attachedNodeIds.includes(col.id)) ||
+          (Array.isArray(b.position) && Math.hypot(b.position[0] - cPos[0], b.position[2] - cPos[2]) <= 0.45)
+        )
+      })
+      if (!hasBase) missingBases.push(col.id)
+    }
+
+    const levelHasBeams = beams.some((bm) => sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, bm), colLvl))
+    if (levelHasBeams) {
+      const hasCap = capConnectors.some((cap) => {
+        if (!sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, cap), colLvl)) return false
+        return (
           (Array.isArray(cap.attachedNodeIds) && cap.attachedNodeIds.includes(col.id)) ||
-          (Array.isArray(cap.position) && Math.hypot(cap.position[0] - cPos[0], cap.position[2] - cPos[2]) <= 0.45),
-      )
+          (Array.isArray(cap.position) && Math.hypot(cap.position[0] - cPos[0], cap.position[2] - cPos[2]) <= 0.45)
+        )
+      })
       if (!hasCap) missingCaps.push(col.id)
     }
   }

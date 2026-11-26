@@ -54,6 +54,7 @@ export function computeSkeletonFingerprint(
       t === 'window' ||
       t === 'roof' ||
       t === 'roof-segment' ||
+      (t === 'structural:beam' && (n.role === 'header' || n.role === 'ridge-beam')) ||
       (t === 'item' && classifyOpeningKind(n) !== null)
     ) {
       relevantIds.push(id)
@@ -87,6 +88,10 @@ export function computeSkeletonFingerprint(
         n.overhang,
         n.wallHeight,
         n.roofType,
+        n.role,
+        n.hostWallId,
+        n.openingId,
+        n.elevationY,
         n.children,
         asset?.category,
         asset?.dimensions,

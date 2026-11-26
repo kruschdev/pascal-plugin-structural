@@ -89,7 +89,9 @@ export function buildStructuralFirestopGeometry(
     firestopKind: node.firestopKind as FirestopKind,
     material: node.material as FirestopMaterial,
     widthM: lenM,
+    heightM: node.heightM,
     depthM: node.thicknessM,
+    mode: 'live',
   })
   mesh.position.set((sx + ex) / 2, node.elevationY, (sz + ez) / 2)
   mesh.rotation.y = yaw
@@ -138,7 +140,8 @@ export const structuralFirestopRenderDefinition: NodeDefinition<typeof Structura
     snappable: {},
   },
   geometry: buildStructuralFirestopGeometry,
-  geometryKey: (n) => JSON.stringify([n.start, n.end, n.elevationY, n.firestopKind, n.material, n.thicknessM]),
+  geometryKey: (n) =>
+    JSON.stringify([n.start, n.end, n.elevationY, n.heightM, n.firestopKind, n.material, n.thicknessM]),
   ports: getStructuralFirestopPorts,
   floorplan: buildStructuralFirestopFloorplan,
   presentation: {

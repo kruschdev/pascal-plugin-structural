@@ -6,6 +6,7 @@
 
 import { auditStructuralScene } from './irc/audit'
 import { type AutopopulateStructuralOptions, autopopulateStructuralScene } from './irc/autopopulate'
+import { isApprovedFirestopMaterial } from './irc/fireblocking'
 import { traceStructuralLoadPaths } from './irc/load-path'
 import { generateStructuralSchedulePack } from './irc/schedule'
 import {
@@ -174,12 +175,13 @@ export const structuralAgentOperations = {
     if (args.autoPlaceHangers !== false) {
       const cat = getConnectorBySku(check.recommendedHangerSku)
       if (cat) {
+        const beamSoffitY = Number((elev - (check.entry.depthIn * INCHES_TO_METERS) / 2).toFixed(4))
         createdNodes.push({
           id: makeOpId('strcon'),
           type: 'structural:connector',
           name: `${cat.sku} End Hangers for ${beamId} (x2)`,
           parentId: args.levelId ?? null,
-          position: [args.start[0], elev, args.start[1]],
+          position: [args.start[0], beamSoffitY, args.start[1]],
           rotation: 0,
           category: cat.category,
           sku: cat.sku,
@@ -245,7 +247,7 @@ export const structuralAgentOperations = {
         depthIn: sizing.entry.depthIn,
         axialLoadLbs,
         transfersFromNodeId: args.transfersFromNodeId,
-        transfersToNodeId: args.transfersToNodeId ?? `footing:${colId}`,
+        transfersToNodeId: args.transfersToNodeId ?? `footing_${colId}`,
         hasSquashBlocks: Boolean(args.hasSquashBlocks),
         footingWidthIn: sizing.footingWidthIn,
         footingDepthIn: sizing.footingDepthIn,
@@ -371,6 +373,19 @@ export const structuralAgentOperations = {
   ): AgentOperationResult {
     const rule = FIRESTOP_RULES[args.firestopKind]
     const material = args.material ?? rule.defaultMaterial
+    if (!isApprovedFirestopMaterial(args.firestopKind, material)) {
+      return {
+        ok: false,
+        tool: 'structural_place_firestop',
+        text: `Material "${material}" is not code-approved for ${args.firestopKind} (${rule.codeRef}). Approved materials: ${rule.approvedMaterials.join(', ')}.`,
+        data: {
+          firestopKind: args.firestopKind,
+          material,
+          approvedMaterials: rule.approvedMaterials,
+          codeRef: rule.codeRef,
+        },
+      }
+    }
     const id = makeOpId('strfs')
     const node: SceneNodeLike = {
       id,
@@ -420,11 +435,19 @@ export const structuralAgentOperations = {
   ): AgentOperationResult {
     const design = { ...DEFAULT_DESIGN_PARAMS, ...args.design }
     if (args.memberKind === 'beam') {
+      const role = args.role ?? 'floor-girder'
+      const isRoofRole =
+        role === 'ridge-beam' ||
+        role === 'hip-beam' ||
+        role === 'valley-beam' ||
+        role === 'porch-beam'
       const res = sizeBeamOrHeader({
         spanFt: args.spanFt ?? 12,
         tributaryWidthFt: args.tributaryWidthFt ?? 12,
-        role: args.role ?? 'floor-girder',
+        role,
         preferredFamily: args.preferredBeamFamily,
+        liveLoadPsf: isRoofRole ? design.roofLiveLoadPsf : design.floorLiveLoadPsf,
+        deadLoadPsf: isRoofRole ? design.roofDeadLoadPsf : design.floorDeadLoadPsf,
         snowLoadPsf: design.groundSnowPsf,
         species: args.species ?? design.species,
         storiesSupported: design.storiesAbove,
@@ -443,6 +466,8 @@ export const structuralAgentOperations = {
         system: args.floorSystem ?? 'tji-ijoist',
         species: args.species ?? design.species,
         spacingIn: args.spacingIn ?? 16,
+        liveLoadPsf: design.floorLiveLoadPsf,
+        deadLoadPsf: design.floorDeadLoadPsf,
       })
       return {
         ok: true,

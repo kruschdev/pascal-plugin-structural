@@ -17,7 +17,7 @@ import {
 } from '@pascal-app/core'
 import { Group } from 'three'
 import { z } from 'zod'
-import { buildConnectorCad } from '../cad/connectors'
+import { buildConnectorCad, getPostCapSeatOffsetM } from '../cad/connectors'
 import type { ConnectorCategory } from '../irc/tables'
 
 export const ConnectorCategoryEnum = z.enum([
@@ -62,12 +62,15 @@ export function buildStructuralConnectorGeometry(
 ): Group {
   const group = new Group()
   group.name = `structural-connector-${node.id}`
-  group.add(
-    buildConnectorCad({
-      sku: node.sku,
-      category: node.category as ConnectorCategory,
-    }),
-  )
+  const mesh = buildConnectorCad({
+    sku: node.sku,
+    category: node.category as ConnectorCategory,
+  })
+  // Seat live post-cap connectors so the bearing plate underside rests flush on top of the column shaft (y = 0)
+  if (node.category === 'post-cap') {
+    mesh.position.y = -getPostCapSeatOffsetM(node.sku)
+  }
+  group.add(mesh)
   return group
 }
 

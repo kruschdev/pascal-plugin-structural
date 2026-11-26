@@ -1,6 +1,6 @@
 /**
  * Clean-Room MIT Procedural 3D CAD Builders for all 10 Simpson-Class Structural Connector
- * Categories & 40 Catalog SKUs from `src/irc/tables.ts`.
+ * Categories & 47 Catalog SKUs from `src/irc/tables.ts`.
  *
  * Zero React, `@pascal-app/editor`, `@pascal-app/viewer`, or `next` imports.
  */
@@ -109,8 +109,21 @@ function resolveCategory(sku: string, explicit?: ConnectorCategory): ConnectorCa
 }
 
 /**
+ * Vertical distance (meters) from a post-cap connector's local origin (`y = 0`)
+ * to the underside of its horizontal beam-bearing seat plate. Shifting a post-cap
+ * mesh down by this offset seats the bearing plate flush on top of a column shaft.
+ */
+export function getPostCapSeatOffsetM(sku: string): number {
+  const entry = getConnectorBySku(sku)
+  const capH = (entry?.dimsIn[1] ?? 6.0) * INCHES_TO_METERS
+  const gauge = sku.toUpperCase().startsWith('CCQ') ? 0.0052 : 0.0032
+  const postLegH = capH * 0.52
+  return postLegH - gauge / 2
+}
+
+/**
  * Procedural 3D CAD builder for Simpson-class structural steel connectors.
- * Supports all 10 categories and all 40 catalog SKUs with physically scaled meters (`y >= 0`).
+ * Supports all 10 categories and all 47 catalog SKUs with physically scaled meters (`y >= 0`).
  */
 export function buildConnectorCad(options: ConnectorCadOptions): Group {
   const { sku, scale = 1 } = options
@@ -631,8 +644,8 @@ export function buildConnectorCad(options: ConnectorCadOptions): Group {
 
         // Lower slotted anchor plate resting on concrete at y = 0
         place(g, new Mesh(new BoxGeometry(baseW, t14, baseD), galv), 0, t14 / 2, 0)
-        // Raised 1" moisture-standoff post-bearing platform
-        place(g, new Mesh(new BoxGeometry(baseW * 0.94, t14, baseD * 0.94), galv), 0, standoffH, 0)
+        // Raised 1" moisture-standoff post-bearing platform spanning full width to connect both side cheeks flush (0 mm gap)
+        place(g, new Mesh(new BoxGeometry(baseW + t14 * 2, t14, baseD * 0.94), galv), 0, standoffH, 0)
         // Twin standoff riser legs creating visible 1" drainage gap
         for (const sign of [-1, 1] as const) {
           place(
@@ -642,7 +655,7 @@ export function buildConnectorCad(options: ConnectorCadOptions): Group {
             standoffH / 2,
             0,
           )
-          // Upper U-saddle post side cheeks
+          // Upper U-saddle post side cheeks seated flush into the standoff platform
           place(
             g,
             new Mesh(new BoxGeometry(t14, cheekH, baseD * 0.92), galv),

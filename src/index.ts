@@ -45,44 +45,44 @@ export const structuralInspectorExtensions: InspectorExtension[] = [
   },
 ]
 
-export const structuralAssemblyDefinition = {
+export const structuralAssemblyDefinition: AnyNodeDefinition = {
   ...structuralAssemblyRenderDefinition,
   snapProfile: 'structural' as const,
   parametrics: structuralAssemblyParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const structuralBeamDefinition = {
+export const structuralBeamDefinition: AnyNodeDefinition = {
   ...structuralBeamRenderDefinition,
   snapProfile: 'structural' as const,
   parametrics: structuralBeamParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const structuralColumnDefinition = {
+export const structuralColumnDefinition: AnyNodeDefinition = {
   ...structuralColumnRenderDefinition,
   snapProfile: 'structural' as const,
   parametrics: structuralColumnParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const structuralConnectorDefinition = {
+export const structuralConnectorDefinition: AnyNodeDefinition = {
   ...structuralConnectorRenderDefinition,
   snapProfile: 'item' as const,
   parametrics: structuralConnectorParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const structuralFirestopDefinition = {
+export const structuralFirestopDefinition: AnyNodeDefinition = {
   ...structuralFirestopRenderDefinition,
   snapProfile: 'structural' as const,
   parametrics: structuralFirestopParametrics,
-}
+} as unknown as AnyNodeDefinition
 
 export const structuralPlugin: Plugin = {
   ...structuralRenderPlugin,
   nodes: [
-    structuralAssemblyDefinition as unknown as AnyNodeDefinition,
-    structuralBeamDefinition as unknown as AnyNodeDefinition,
-    structuralColumnDefinition as unknown as AnyNodeDefinition,
-    structuralConnectorDefinition as unknown as AnyNodeDefinition,
-    structuralFirestopDefinition as unknown as AnyNodeDefinition,
+    structuralAssemblyDefinition,
+    structuralBeamDefinition,
+    structuralColumnDefinition,
+    structuralConnectorDefinition,
+    structuralFirestopDefinition,
   ],
   inspectorExtensions: structuralInspectorExtensions,
 }
@@ -94,7 +94,7 @@ export const structuralHostPanel: EditorHostPanel = {
   summary:
     'Builder-grade IRC/AWC/NDS wood & engineered framing, LVL/Glulam/PSL/steel beams, Simpson-class hardware, and R302.11 fire blocking.',
   description:
-    'Author Priority #1 residential and light-commercial structural systems with multi-species (DF-L, SPF, SYP, Hem-Fir) framing, LVL/Glulam/PSL/LSL/Flitch/A992 Steel beams, TJI I-joists, roof/floor trusses, 40-SKU Simpson-class connector schedules, full IRC R302.11/R302.12 fire blocking & draftstopping, continuous gravity/uplift load-path tracing, and priced BOMs.',
+    'Author Priority #1 residential and light-commercial structural systems with multi-species (DF-L, SPF, SYP, Hem-Fir) framing, LVL/Glulam/PSL/LSL/Flitch/A992 Steel beams, TJI I-joists, roof/floor trusses, 47-SKU Simpson-class connector schedules, full IRC R302.11/R302.12 fire blocking & draftstopping, continuous gravity/uplift load-path tracing, and priced BOMs.',
   category: 'MEP & Engineering',
   creator: {
     name: 'Kevin Ruschman (@kruschdev)',
@@ -121,10 +121,15 @@ export const structuralScheduleView: EditorHostView = {
 export const structuralChatExtension: PluginChatExtension = {
   pluginId: STRUCTURAL_PLUGIN_ID,
   cards: {
-    structural_audit_irc: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_trace_load_path: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_generate_schedule: () => Promise.resolve({ default: StructuralChatCard }),
     structural_autopopulate_irc: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_place_beam: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_place_column: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_place_connector: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_place_firestop: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_size_member: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_trace_load_path: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_audit_irc: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_generate_schedule: () => Promise.resolve({ default: StructuralChatCard }),
   },
   actions: [
     {

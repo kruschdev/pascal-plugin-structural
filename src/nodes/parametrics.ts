@@ -3,6 +3,7 @@
  */
 
 import type { ParametricDescriptor } from '@pascal-app/core'
+import { CONNECTOR_CATALOG, getConnectorBySku } from '../irc/tables'
 import {
   AssemblyKindEnum,
   FloorSystemEnum,
@@ -24,6 +25,7 @@ export const structuralAssemblyParametrics: ParametricDescriptor<StructuralAssem
         { key: 'assemblyKind', kind: 'enum', options: [...AssemblyKindEnum.options] },
         { key: 'species', kind: 'enum', options: [...LumberSpeciesEnum.options] },
         { key: 'studSize', kind: 'enum', options: [...StudSizeEnum.options], display: 'segmented' },
+        { key: 'studSpacingIn', kind: 'number', label: 'Stud Spacing (OC)', unit: 'in', min: 12, max: 24, step: 4 },
         { key: 'floorSystem', kind: 'enum', options: [...FloorSystemEnum.options] },
         { key: 'roofSystem', kind: 'enum', options: [...RoofSystemEnum.options] },
       ],
@@ -37,6 +39,23 @@ export const structuralAssemblyParametrics: ParametricDescriptor<StructuralAssem
       ],
     },
   ],
+  derive: (next, patch, previous) => {
+    if (patch.studSpacingIn !== undefined) {
+      const val = next.studSpacingIn
+      let snapped: 12 | 16 | 24
+      if (val === 12 || val === 16 || val === 24) {
+        snapped = val
+      } else if (previous?.studSpacingIn !== undefined && val > previous.studSpacingIn) {
+        snapped = val > 16 ? 24 : val > 12 ? 16 : 12
+      } else if (previous?.studSpacingIn !== undefined && val < previous.studSpacingIn) {
+        snapped = val < 16 ? 12 : val < 24 ? 16 : 24
+      } else {
+        snapped = val <= 14 ? 12 : val <= 20 ? 16 : 24
+      }
+      if (snapped !== val) return { studSpacingIn: snapped }
+    }
+    return {}
+  },
 }
 
 export const structuralBeamParametrics: ParametricDescriptor<StructuralBeamNode> = {
@@ -46,6 +65,9 @@ export const structuralBeamParametrics: ParametricDescriptor<StructuralBeamNode>
       fields: [
         { key: 'role', kind: 'enum', options: [...BeamRoleEnum.options] },
         { key: 'beamType', kind: 'enum', options: [...BeamMaterialFamilyEnum.options] },
+        { key: 'species', kind: 'enum', options: [...LumberSpeciesEnum.options] },
+        { key: 'mountStyle', kind: 'enum', options: ['flush', 'dropped'], display: 'segmented' },
+        { key: 'elevationY', kind: 'number', label: 'Centerline Elev Y', unit: 'm', min: -4, max: 12, step: 0.05 },
         { key: 'plyCount', kind: 'number', min: 1, max: 4, step: 1 },
         { key: 'widthIn', kind: 'number', unit: 'in', min: 1.5, max: 12, step: 0.25 },
         { key: 'depthIn', kind: 'number', unit: 'in', min: 3.5, max: 28, step: 0.125 },
@@ -56,6 +78,7 @@ export const structuralBeamParametrics: ParametricDescriptor<StructuralBeamNode>
       fields: [
         { key: 'tributaryWidthFt', kind: 'number', unit: 'ft', min: 1, max: 60, step: 1 },
         { key: 'liveLoadPsf', kind: 'number', unit: 'psf', min: 10, max: 150, step: 5 },
+        { key: 'deadLoadPsf', kind: 'number', unit: 'psf', min: 5, max: 50, step: 2 },
         { key: 'snowLoadPsf', kind: 'number', unit: 'psf', min: 0, max: 200, step: 5 },
         { key: 'bearingLengthIn', kind: 'number', unit: 'in', min: 1.5, max: 12, step: 0.5 },
         { key: 'jackStudsEachEnd', kind: 'number', min: 1, max: 4, step: 1 },
@@ -92,6 +115,7 @@ export const structuralConnectorParametrics: ParametricDescriptor<StructuralConn
     {
       label: 'Hardware & Capacity',
       fields: [
+        { key: 'sku', kind: 'enum', label: 'Connector SKU', options: CONNECTOR_CATALOG.map((c) => c.sku) },
         { key: 'category', kind: 'enum', options: [...ConnectorCategoryEnum.options] },
         { key: 'quantity', kind: 'number', min: 1, max: 500, step: 1 },
         { key: 'upliftCapacityLbs', kind: 'number', unit: 'lbs', min: 0, max: 50000, step: 50 },
@@ -100,6 +124,21 @@ export const structuralConnectorParametrics: ParametricDescriptor<StructuralConn
       ],
     },
   ],
+  derive: (_next, patch) => {
+    if (typeof patch.sku === 'string') {
+      const cat = getConnectorBySku(patch.sku)
+      if (cat) {
+        return {
+          category: cat.category,
+          fastenerSpec: cat.fastenerSpec,
+          upliftCapacityLbs: cat.upliftLbs,
+          downloadCapacityLbs: cat.downloadLbs,
+          lateralCapacityLbs: cat.lateralLbs,
+        }
+      }
+    }
+    return {}
+  },
 }
 
 export const structuralFirestopParametrics: ParametricDescriptor<StructuralFirestopNode> = {

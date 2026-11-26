@@ -19,13 +19,14 @@ import {
   type RoofSystemKind,
   type SceneNodeLike,
   type SeismicCategory,
-  type StudSize,
+  type StructuralDesignParams,
   type StudSpacingIn,
   belongsToLevel,
 } from '../irc/tables'
 import {
   type StructuralLayerKey,
   type StructuralScheduleTab,
+  type UiStudSize,
   useStructuralUi,
 } from './store'
 
@@ -36,6 +37,7 @@ const ASSEMBLY_LAYER_KEYS: ReadonlySet<StructuralLayerKey> = new Set([
   'walls',
   'floor',
   'roof',
+  'beams',
   'foundation',
   'connectors',
   'firestop',
@@ -157,6 +159,7 @@ export default function StructuralHostPanel() {
   const seismicCategory = useStructuralUi((s) => s.seismicCategory)
   const frostDepthIn = useStructuralUi((s) => s.frostDepthIn)
   const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
+  const editedDesignParams = useStructuralUi((s) => s.editedDesignParams)
   const preferredBeamFamily = useStructuralUi((s) => s.preferredBeamFamily)
   const preferredColumnType = useStructuralUi((s) => s.preferredColumnType)
   const xrayActive = useStructuralUi((s) => s.xrayActive)
@@ -231,8 +234,14 @@ export default function StructuralHostPanel() {
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
   const levelId = activeLevelOf(nodes, selectedLevelId)
-  const designParams = useMemo(
-    () => ({
+  const designOverride = useMemo(
+    () => (Object.keys(editedDesignParams).length > 0 ? editedDesignParams : undefined),
+    [editedDesignParams],
+  )
+  const autoFrameDesign = useMemo(() => {
+    const firstAssembly = Object.values(record).find((n) => n.type === 'structural:assembly')
+    const persisted = (firstAssembly?.designParams as Partial<StructuralDesignParams> | undefined) ?? {}
+    return {
       codeEdition,
       species,
       groundSnowPsf,
@@ -241,10 +250,22 @@ export default function StructuralHostPanel() {
       seismicCategory,
       frostDepthIn,
       soilBearingPsf,
-    }),
-    [codeEdition, species, groundSnowPsf, windMph, exposure, seismicCategory, frostDepthIn, soilBearingPsf],
-  )
-  const audit = useMemo(() => auditStructuralScene(record, designParams), [record, designParams])
+      ...persisted,
+      ...editedDesignParams,
+    }
+  }, [
+    record,
+    codeEdition,
+    species,
+    groundSnowPsf,
+    windMph,
+    exposure,
+    seismicCategory,
+    frostDepthIn,
+    soilBearingPsf,
+    editedDesignParams,
+  ])
+  const audit = useMemo(() => auditStructuralScene(record, designOverride), [record, designOverride])
 
   const counts = useMemo(() => {
     let beams = 0
@@ -287,7 +308,7 @@ export default function StructuralHostPanel() {
     }
     const outcome = structuralAgentOperations.structural_autopopulate_irc(record, {
       levelId,
-      studSize,
+      studSize: studSize === 'auto' ? undefined : studSize,
       studSpacingIn,
       floorSystem,
       roofSystem,
@@ -296,7 +317,7 @@ export default function StructuralHostPanel() {
       includeRoof: true,
       includeFoundation: true,
       includeFireblocking: true,
-      design: designParams,
+      design: autoFrameDesign,
     })
     commitCreatedNodes(outcome.createdNodes ?? [], true)
     applyXrayMode(true)
@@ -507,9 +528,10 @@ export default function StructuralHostPanel() {
             <div style={{ display: 'flex', gap: 4 }}>
               <select
                 value={studSize}
-                onChange={(e) => setStudSize(e.target.value as StudSize)}
+                onChange={(e) => setStudSize(e.target.value as UiStudSize)}
                 style={{ ...selectStyle, flex: 1 }}
               >
+                <option value="auto">Auto (2x4/2x6)</option>
                 <option value="2x4">2x4</option>
                 <option value="2x6">2x6</option>
               </select>

@@ -983,7 +983,7 @@ export function resolveNodeLevelId(
     if (parent.type === 'level') return parent.id
     cur = parent
   }
-  return typeof node.parentId === 'string' ? node.parentId : null
+  return null
 }
 
 /** True when both nodes belong to the same level, or at least one is unscoped (flat single-level scene). */

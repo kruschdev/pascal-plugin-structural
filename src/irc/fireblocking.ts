@@ -172,7 +172,7 @@ export function deriveRequiredFirestops(params: {
         firestopKind: 'soffit-drop-ceiling',
         material: '23/32-osb',
         codeRef: FIRESTOP_RULES['soffit-drop-ceiling'].codeRef,
-        label: `R302.11(1) ${isKnee ? 'Knee-Wall' : 'Soffit / Drop-Ceiling'} Fireblock — ${edge.labelSuffix} (${name || zone.id})`,
+        label: `R302.11(1) ${isKnee ? 'Knee-Wall' : 'Soffit / Drop-Ceiling'} Fireblock (${edge.labelSuffix}, ${name || zone.id})`,
         start: edge.start,
         end: edge.end,
         elevationY: Number(elevY.toFixed(3)),
@@ -254,28 +254,6 @@ export function deriveRequiredFirestops(params: {
     }
   }
 
-  // 4. IRC R302.11(4): Vertical chases / chimneys / plumbing wet shafts
-  for (const zone of zones) {
-    const name = typeof zone.name === 'string' ? zone.name : ''
-    if (!/chase|chimney|fireplace|shaft|mechanical/i.test(name)) continue
-    if (!Array.isArray(zone.polygon) || zone.polygon.length < 3) continue
-    const b = polygonBounds(zone.polygon)
-    out.push({
-      id: `fs_chase_${seq++}`,
-      firestopKind: 'chase-chimney-shaft',
-      material: /chimney|fireplace/i.test(name) ? 'mineral-wool-batt' : '1/2-gypsum',
-      codeRef: FIRESTOP_RULES['chase-chimney-shaft'].codeRef,
-      label: `R302.11(4) Vertical Shaft / Chimney Fire Blocking (${name})`,
-      start: [b.minX, b.minZ],
-      end: [b.maxX, b.maxZ],
-      elevationY: 2.74,
-      heightM: 0.14,
-      thicknessM: Math.max(0.3, b.maxZ - b.minZ),
-      levelId,
-    })
-  }
-
-  // 5. IRC R302.11(5): MEP pipe, conduit & duct vertical penetrations through top/bottom plates
   // Derive level base elevation and top-plate plane from actual wall elevations & heights on this level
   const wallBases = walls.map((w) => (typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0))
   const levelBaseY = wallBases.length > 0 ? Math.min(...wallBases) : 0
@@ -284,8 +262,37 @@ export function deriveRequiredFirestops(params: {
     const h = typeof w.height === 'number' && w.height > 0 ? w.height : 2.7432
     return Math.max(maxTop, base + h)
   }, 0)
+  const levelCeilingY = maxWallTopY > levelBaseY ? maxWallTopY : levelBaseY + 2.7432
   const bottomPlateY = Number((levelBaseY + 0.04).toFixed(3))
   const topPlateY = maxWallTopY > levelBaseY ? Number((maxWallTopY - 0.04).toFixed(3)) : Number((levelBaseY + 2.7).toFixed(3))
+
+  // 4. IRC R302.11(4): Vertical chases / chimneys / plumbing wet shafts (axis-aligned at actual level ceiling plane)
+  for (const zone of zones) {
+    const name = typeof zone.name === 'string' ? zone.name : ''
+    if (!/chase|chimney|fireplace|shaft|mechanical/i.test(name)) continue
+    if (!Array.isArray(zone.polygon) || zone.polygon.length < 3) continue
+    const b = polygonBounds(zone.polygon)
+    const spanX = Math.max(0.3, b.maxX - b.minX)
+    const spanZ = Math.max(0.3, b.maxZ - b.minZ)
+    const midZ = Number(((b.minZ + b.maxZ) / 2).toFixed(4))
+    const halfX = spanX / 2
+    const midX = (b.minX + b.maxX) / 2
+    out.push({
+      id: `fs_chase_${seq++}`,
+      firestopKind: 'chase-chimney-shaft',
+      material: /chimney|fireplace/i.test(name) ? 'mineral-wool-batt' : '1/2-gypsum',
+      codeRef: FIRESTOP_RULES['chase-chimney-shaft'].codeRef,
+      label: `R302.11(4) Vertical Shaft / Chimney Fire Blocking (${name})`,
+      start: [Number((midX - halfX).toFixed(4)), midZ],
+      end: [Number((midX + halfX).toFixed(4)), midZ],
+      elevationY: Number(levelCeilingY.toFixed(3)),
+      heightM: 0.14,
+      thicknessM: Number(spanZ.toFixed(4)),
+      levelId,
+    })
+  }
+
+  // 5. IRC R302.11(5): MEP pipe, conduit & duct vertical penetrations through top/bottom plates
   const mepRuns = all.filter(
     (n) =>
       (n.type === 'plumbing:pipe-run' ||

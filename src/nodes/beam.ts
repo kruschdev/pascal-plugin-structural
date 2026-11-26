@@ -70,11 +70,12 @@ export type StructuralBeamNode = z.infer<typeof StructuralBeamNode>
 export function getStructuralBeamPorts(node: StructuralBeamNode): NodePort[] {
   const [sx, sz] = node.start
   const [ex, ez] = node.end
-  const y = node.elevationY
+  const depthM = node.depthIn * INCHES_TO_METERS
+  const soffitY = node.elevationY - depthM / 2
   const wM = node.widthIn * INCHES_TO_METERS
   return [
-    { id: 'bearing-start', position: [sx, y, sz], direction: [0, -1, 0], diameter: wM, system: 'structural' },
-    { id: 'bearing-end', position: [ex, y, ez], direction: [0, -1, 0], diameter: wM, system: 'structural' },
+    { id: 'bearing-start', position: [sx, soffitY, sz], direction: [0, -1, 0], diameter: wM, system: 'structural' },
+    { id: 'bearing-end', position: [ex, soffitY, ez], direction: [0, -1, 0], diameter: wM, system: 'structural' },
   ]
 }
 
@@ -90,6 +91,7 @@ export function buildStructuralBeamGeometry(
   const dz = ez - sz
   const lenM = Math.max(0.3, Math.hypot(dx, dz))
   const yaw = Math.atan2(-dz, dx)
+  const depthM = node.depthIn * INCHES_TO_METERS
 
   const beamMesh = buildBeamCad({
     family: node.beamType as BeamMaterialFamily,
@@ -99,7 +101,8 @@ export function buildStructuralBeamGeometry(
     plyCount: node.plyCount,
     species: node.species as LumberSpecies,
   })
-  beamMesh.position.set((sx + ex) / 2, node.elevationY, (sz + ez) / 2)
+  // Center beam vertically around `node.elevationY` (buildBeamCad rests at local y = 0..depthM)
+  beamMesh.position.set((sx + ex) / 2, node.elevationY - depthM / 2, (sz + ez) / 2)
   beamMesh.rotation.y = yaw
   group.add(beamMesh)
   return group

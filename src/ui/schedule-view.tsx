@@ -23,14 +23,7 @@ import {
 export default function StructuralScheduleView() {
   const nodes = useScene((s) => s.nodes)
   const setSelection = useViewer((s) => s.setSelection)
-  const codeEdition = useStructuralUi((s) => s.codeEdition)
-  const species = useStructuralUi((s) => s.species)
-  const groundSnowPsf = useStructuralUi((s) => s.groundSnowPsf)
-  const windMph = useStructuralUi((s) => s.windMph)
-  const exposure = useStructuralUi((s) => s.exposure)
-  const seismicCategory = useStructuralUi((s) => s.seismicCategory)
-  const frostDepthIn = useStructuralUi((s) => s.frostDepthIn)
-  const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
+  const editedDesignParams = useStructuralUi((s) => s.editedDesignParams)
   const activeTab = useStructuralUi((s) => s.activeTab)
   const setActiveTab = useStructuralUi((s) => s.setActiveTab)
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null)
@@ -44,17 +37,8 @@ export default function StructuralScheduleView() {
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
   const designOverride = useMemo(
-    () => ({
-      codeEdition,
-      species,
-      groundSnowPsf,
-      windMph,
-      exposure,
-      seismicCategory,
-      frostDepthIn,
-      soilBearingPsf,
-    }),
-    [codeEdition, species, groundSnowPsf, windMph, exposure, seismicCategory, frostDepthIn, soilBearingPsf],
+    () => (Object.keys(editedDesignParams).length > 0 ? editedDesignParams : undefined),
+    [editedDesignParams],
   )
   const pack = useMemo(
     () => generateStructuralSchedulePack(record, designOverride),
@@ -285,8 +269,8 @@ export default function StructuralScheduleView() {
                     <td style={tdStyle}>{c.category}</td>
                     <td style={tdStyle}>{c.name}</td>
                     <td style={tdStyle}><strong>{c.totalQuantity}</strong></td>
-                    <td style={tdStyle}>{c.upliftLbs > 0 ? c.upliftLbs.toLocaleString() : '—'}</td>
-                    <td style={tdStyle}>{c.downloadLbs > 0 ? c.downloadLbs.toLocaleString() : '—'}</td>
+                    <td style={tdStyle}>{c.upliftLbs > 0 ? c.upliftLbs.toLocaleString() : '-'}</td>
+                    <td style={tdStyle}>{c.downloadLbs > 0 ? c.downloadLbs.toLocaleString() : '-'}</td>
                     <td style={tdStyle}>{c.fastenerSpec}</td>
                     <td style={tdStyle}>{c.codeRef}</td>
                   </tr>
@@ -482,7 +466,7 @@ export default function StructuralScheduleView() {
                 border: '1px solid #22c55e',
               }}
             >
-              0 Errors · 0 Warnings — All IRC/AWC/NDS/WFCM structural, load-path, fire-blocking, and
+              0 Errors · 0 Warnings. All IRC/AWC/NDS/WFCM structural, load-path, fire-blocking, and
               Priority #1 MEP right-of-way checks passed!
             </div>
           )}
@@ -599,7 +583,7 @@ export default function StructuralScheduleView() {
 
       {/* Footer Disclaimer */}
       <div style={{ fontSize: 10, opacity: 0.7, marginTop: 'auto', paddingTop: 8 }}>
-        Deterministic IRC/AWC/NDS/AISC drafting aid only — all structural members, lateral shear
+        Deterministic IRC/AWC/NDS/AISC drafting aid only; all structural members, lateral shear
         schedules, connectors, and footings require verification by a licensed SE/PE and local AHJ.
       </div>
     </div>

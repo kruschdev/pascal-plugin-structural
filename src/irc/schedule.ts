@@ -120,9 +120,13 @@ export function generateStructuralSchedulePack(
   const columns: ColumnScheduleRow[] = all
     .filter((n) => n.type === 'structural:column')
     .map((c, idx) => {
-      const fw = Number(c.footingWidthIn ?? 24)
-      const fd = Number(c.footingDepthIn ?? 12)
+      const fw = typeof c.footingWidthIn === 'number' ? c.footingWidthIn : 24
+      const fd = typeof c.footingDepthIn === 'number' ? c.footingDepthIn : 12
       const rebar = String(c.footingRebar ?? '(4) #4 EW')
+      const footingCallout =
+        fw <= 0 || fd <= 0
+          ? 'Transfers to lower column'
+          : `${fw}"x${fw}"x${fd}" (${rebar})`
       return {
         id: c.id,
         mark: `C-${idx + 1}`,
@@ -131,7 +135,7 @@ export function generateStructuralSchedulePack(
         heightFt: Number(((typeof c.heightM === 'number' ? c.heightM : 2.74) * METERS_TO_FEET).toFixed(2)),
         axialLoadLbs: Number(c.axialLoadLbs ?? 0),
         hasSquashBlocks: Boolean(c.hasSquashBlocks),
-        footingCallout: `${fw}"x${fw}"x${fd}" — ${rebar}`,
+        footingCallout,
       }
     })
 

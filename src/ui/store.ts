@@ -37,10 +37,12 @@ export type StructuralLayerKey =
   | 'firestop'
   | 'foundation'
 
+export type UiStudSize = StudSize | 'auto'
+
 export type StructuralUiState = {
   codeEdition: StructuralDesignParams['codeEdition']
   species: LumberSpecies
-  studSize: StudSize
+  studSize: UiStudSize
   studSpacingIn: StudSpacingIn
   floorSystem: FloorSystemKind
   roofSystem: RoofSystemKind
@@ -50,6 +52,8 @@ export type StructuralUiState = {
   seismicCategory: SeismicCategory
   frostDepthIn: number
   soilBearingPsf: number
+  /** Only design fields explicitly edited by the user in the UI panel (so persisted assembly.designParams are never silently clobbered). */
+  editedDesignParams: Partial<StructuralDesignParams>
   preferredBeamFamily: BeamMaterialFamily
   preferredColumnType: ColumnType
   activeTab: StructuralScheduleTab
@@ -58,7 +62,7 @@ export type StructuralUiState = {
   hiddenLayers: Readonly<Record<StructuralLayerKey, boolean>>
   setCodeEdition: (v: StructuralDesignParams['codeEdition']) => void
   setSpecies: (v: LumberSpecies) => void
-  setStudSize: (v: StudSize) => void
+  setStudSize: (v: UiStudSize) => void
   setStudSpacingIn: (v: StudSpacingIn) => void
   setFloorSystem: (v: FloorSystemKind) => void
   setRoofSystem: (v: RoofSystemKind) => void
@@ -91,7 +95,7 @@ const DEFAULT_HIDDEN_LAYERS: Readonly<Record<StructuralLayerKey, boolean>> = {
 export const useStructuralUi = create<StructuralUiState>((set) => ({
   codeEdition: DEFAULT_DESIGN_PARAMS.codeEdition,
   species: DEFAULT_DESIGN_PARAMS.species,
-  studSize: '2x6',
+  studSize: 'auto',
   studSpacingIn: 16,
   floorSystem: 'tji-ijoist',
   roofSystem: 'stick-rafter',
@@ -101,6 +105,7 @@ export const useStructuralUi = create<StructuralUiState>((set) => ({
   seismicCategory: DEFAULT_DESIGN_PARAMS.seismicCategory,
   frostDepthIn: DEFAULT_DESIGN_PARAMS.frostDepthIn,
   soilBearingPsf: DEFAULT_DESIGN_PARAMS.soilBearingPsf,
+  editedDesignParams: {},
   preferredBeamFamily: 'lvl',
   preferredColumnType: 'wood-solid',
   activeTab: 'beams',
@@ -108,18 +113,34 @@ export const useStructuralUi = create<StructuralUiState>((set) => ({
   wallModeBeforeXray: null,
   hiddenLayers: { ...DEFAULT_HIDDEN_LAYERS },
 
-  setCodeEdition: (codeEdition) => set({ codeEdition }),
-  setSpecies: (species) => set({ species }),
+  setCodeEdition: (codeEdition) =>
+    set((s) => ({ codeEdition, editedDesignParams: { ...s.editedDesignParams, codeEdition } })),
+  setSpecies: (species) =>
+    set((s) => ({ species, editedDesignParams: { ...s.editedDesignParams, species } })),
   setStudSize: (studSize) => set({ studSize }),
   setStudSpacingIn: (studSpacingIn) => set({ studSpacingIn }),
   setFloorSystem: (floorSystem) => set({ floorSystem }),
   setRoofSystem: (roofSystem) => set({ roofSystem }),
-  setGroundSnowPsf: (groundSnowPsf) => set({ groundSnowPsf: Math.max(0, Math.min(200, groundSnowPsf)) }),
-  setWindMph: (windMph) => set({ windMph: Math.max(85, Math.min(200, windMph)) }),
-  setExposure: (exposure) => set({ exposure }),
-  setSeismicCategory: (seismicCategory) => set({ seismicCategory }),
-  setFrostDepthIn: (frostDepthIn) => set({ frostDepthIn: Math.max(0, Math.min(96, frostDepthIn)) }),
-  setSoilBearingPsf: (soilBearingPsf) => set({ soilBearingPsf: Math.max(1000, Math.min(6000, soilBearingPsf)) }),
+  setGroundSnowPsf: (groundSnowPsf) => {
+    const clamped = Math.max(0, Math.min(200, groundSnowPsf))
+    set((s) => ({ groundSnowPsf: clamped, editedDesignParams: { ...s.editedDesignParams, groundSnowPsf: clamped } }))
+  },
+  setWindMph: (windMph) => {
+    const clamped = Math.max(85, Math.min(200, windMph))
+    set((s) => ({ windMph: clamped, editedDesignParams: { ...s.editedDesignParams, windMph: clamped } }))
+  },
+  setExposure: (exposure) =>
+    set((s) => ({ exposure, editedDesignParams: { ...s.editedDesignParams, exposure } })),
+  setSeismicCategory: (seismicCategory) =>
+    set((s) => ({ seismicCategory, editedDesignParams: { ...s.editedDesignParams, seismicCategory } })),
+  setFrostDepthIn: (frostDepthIn) => {
+    const clamped = Math.max(0, Math.min(96, frostDepthIn))
+    set((s) => ({ frostDepthIn: clamped, editedDesignParams: { ...s.editedDesignParams, frostDepthIn: clamped } }))
+  },
+  setSoilBearingPsf: (soilBearingPsf) => {
+    const clamped = Math.max(1000, Math.min(6000, soilBearingPsf))
+    set((s) => ({ soilBearingPsf: clamped, editedDesignParams: { ...s.editedDesignParams, soilBearingPsf: clamped } }))
+  },
   setPreferredBeamFamily: (preferredBeamFamily) => set({ preferredBeamFamily }),
   setPreferredColumnType: (preferredColumnType) => set({ preferredColumnType }),
   setActiveTab: (activeTab) => set({ activeTab }),
@@ -133,7 +154,7 @@ export const useStructuralUi = create<StructuralUiState>((set) => ({
     set({
       codeEdition: DEFAULT_DESIGN_PARAMS.codeEdition,
       species: DEFAULT_DESIGN_PARAMS.species,
-      studSize: '2x6',
+      studSize: 'auto',
       studSpacingIn: 16,
       floorSystem: 'tji-ijoist',
       roofSystem: 'stick-rafter',
@@ -143,6 +164,7 @@ export const useStructuralUi = create<StructuralUiState>((set) => ({
       seismicCategory: DEFAULT_DESIGN_PARAMS.seismicCategory,
       frostDepthIn: DEFAULT_DESIGN_PARAMS.frostDepthIn,
       soilBearingPsf: DEFAULT_DESIGN_PARAMS.soilBearingPsf,
+      editedDesignParams: {},
       preferredBeamFamily: 'lvl',
       preferredColumnType: 'wood-solid',
     }),

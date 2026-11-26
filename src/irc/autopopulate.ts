@@ -328,21 +328,32 @@ export function autopopulateStructuralScene(
         design.storiesAbove > 0
           ? design.floorLiveLoadPsf
           : Math.max(design.roofLiveLoadPsf, design.groundSnowPsf)
-      const headerSizing = sizeBeamOrHeader({
-        spanFt,
+      const headerInputBase = {
         tributaryWidthFt: effTribFt,
-        role: 'header',
+        role: 'header' as const,
         preferredFamily: spanFt > 8 ? (options.preferredBeamFamily ?? 'lvl') : options.preferredBeamFamily,
         snowLoadPsf: design.groundSnowPsf,
         liveLoadPsf: effLivePsf,
         deadLoadPsf: design.roofDeadLoadPsf,
         species: design.species,
         storiesSupported: design.storiesAbove,
-      })
+      }
+      const clearHeaderSizing = sizeBeamOrHeader({ ...headerInputBase, spanFt })
 
-      const halfRun = opWidthM / 2 + headerSizing.jackStudsEachEnd * 1.5 * INCHES_TO_METERS
+      const halfRun = opWidthM / 2 + clearHeaderSizing.jackStudsEachEnd * 1.5 * INCHES_TO_METERS
       const startPt: Vec2 = [ws[0] + ux * Math.max(0, centerU - halfRun), ws[1] + uz * Math.max(0, centerU - halfRun)]
       const endPt: Vec2 = [ws[0] + ux * Math.min(lenM, centerU + halfRun), ws[1] + uz * Math.min(lenM, centerU + halfRun)]
+      const fullHeaderSpanFt = Math.max(
+        spanFt,
+        Math.hypot(endPt[0] - startPt[0], endPt[1] - startPt[1]) * METERS_TO_FEET,
+      )
+      const headerSizing =
+        fullHeaderSpanFt > spanFt + 0.05
+          ? sizeBeamOrHeader({ ...headerInputBase, spanFt: fullHeaderSpanFt })
+          : clearHeaderSizing
+      const providedBearingIn = Number(
+        Math.max(headerSizing.jackStudsEachEnd * 1.5, Math.ceil(headerSizing.requiredBearingIn * 2) / 2).toFixed(2),
+      )
       const headerDepthM = headerSizing.entry.depthIn * INCHES_TO_METERS
       const headerY = Math.min(wallBaseY + wallH - 0.08 - headerDepthM / 2, wallBaseY + op.headYM + headerDepthM / 2)
 
@@ -367,7 +378,7 @@ export function autopopulateStructuralScene(
         liveLoadPsf: effLivePsf,
         deadLoadPsf: design.roofDeadLoadPsf,
         snowLoadPsf: design.groundSnowPsf,
-        bearingLengthIn: headerSizing.requiredBearingIn,
+        bearingLengthIn: providedBearingIn,
         jackStudsEachEnd: headerSizing.jackStudsEachEnd,
         endReactionLbs: headerSizing.shearLbs,
         hostWallId: hostWall.id,
@@ -526,7 +537,7 @@ export function autopopulateStructuralScene(
           depthIn: colSizing.entry.depthIn,
           axialLoadLbs: colAxialLbs,
           transfersFromNodeId: leftBayId,
-          transfersToNodeId: includeFoundation ? `footing:${colId}` : undefined,
+          transfersToNodeId: includeFoundation ? `footing_${colId}` : undefined,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? colSizing.footingWidthIn : 0,
           footingDepthIn: includeFoundation ? colSizing.footingDepthIn : 0,
@@ -672,7 +683,7 @@ export function autopopulateStructuralScene(
           depthIn: postSizing.entry.depthIn,
           axialLoadLbs: postAxialLbs,
           transfersFromNodeId: attachedRidgeIds[0],
-          transfersToNodeId: includeFoundation ? `footing:${colId}` : undefined,
+          transfersToNodeId: includeFoundation ? `footing_${colId}` : undefined,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? postSizing.footingWidthIn : 0,
           footingDepthIn: includeFoundation ? postSizing.footingDepthIn : 0,
