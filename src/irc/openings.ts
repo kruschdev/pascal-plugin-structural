@@ -6,7 +6,31 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
-import { type SceneNodeLike, type Vec2, belongsToLevel } from './tables'
+import { type SceneNodeLike, type Vec2, belongsToLevel, resolveNodeLevelId } from './tables'
+
+/**
+ * Resolve a wall's true height in meters: explicit `wall.height` -> enclosing `level.height` -> fallback.
+ * Commercial scenes (e.g. 5 m double-height halls) often omit `wall.height` and rely on `level.height`.
+ */
+export function resolveWallHeightM(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  wall: SceneNodeLike,
+  fallbackM = 2.55,
+): number {
+  if (typeof wall.height === 'number' && Number.isFinite(wall.height) && wall.height > 0) {
+    return wall.height
+  }
+  const hostLevelId = resolveNodeLevelId(nodes, wall)
+  const hostLevel = hostLevelId
+    ? nodes[hostLevelId]
+    : typeof wall.parentId === 'string'
+      ? nodes[wall.parentId]
+      : undefined
+  if (typeof hostLevel?.height === 'number' && Number.isFinite(hostLevel.height) && hostLevel.height > 0) {
+    return hostLevel.height
+  }
+  return fallbackM
+}
 
 export type ExtractedWallOpening = {
   id: string
@@ -69,7 +93,7 @@ export function extractWallOpenings(
   const ez = Number(wall.end[1])
   const wallLenM = Math.hypot(ex - sx, ez - sz)
   if (!Number.isFinite(wallLenM) || wallLenM < 0.3) return []
-  const wallHeightM = typeof wall.height === 'number' && wall.height > 0 ? wall.height : 2.55
+  const wallHeightM = resolveWallHeightM(nodes, wall, 2.55)
 
   const childIds = new Set<string>(Array.isArray(wall.children) ? (wall.children as string[]) : [])
   const candidates: SceneNodeLike[] = []
@@ -261,7 +285,7 @@ export function clusterLevelFootprints(
       maxX: Math.max(sx, ex),
       minZ: Math.min(sz, ez),
       maxZ: Math.max(sz, ez),
-      height: typeof w.height === 'number' && w.height > 0 ? w.height : 2.55,
+      height: resolveWallHeightM(nodes, w, 2.55),
       elev: typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0,
     }
     wallBoxes.push(wb)
@@ -366,7 +390,7 @@ export function computeLevelBounds(
         minZ = Math.min(minZ, sz, ez)
         maxZ = Math.max(maxZ, sz, ez)
       }
-      const h = typeof n.height === 'number' && n.height > 0 ? n.height : 2.55
+      const h = resolveWallHeightM(nodes, n, 2.55)
       hSum += h
       hCount += 1
       const e = typeof n.elevation === 'number' && Number.isFinite(n.elevation) ? n.elevation : 0

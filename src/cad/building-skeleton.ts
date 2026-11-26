@@ -42,8 +42,7 @@ import {
   findLevelCommercialRtus,
   isHighestWalledLevelInBuilding,
   isLowestWalledLevelInBuilding,
-  levelSortOrder,
-  shouldAdoptWallLessRoofLevel,
+  shouldAdoptRoofSegmentOntoLevel,
 } from '../irc/tables'
 
 type BucketId =
@@ -158,15 +157,110 @@ type ExtractedRoofSegment = {
   cz: number
   yaw: number
   roofType: string
-  /** Local X dimension (ridge length for gable/hip). */
+  /** Raw local X dimension from Pascal `roof-segment`. */
   widthM: number
-  /** Local Z dimension (eave-to-eave span across slopes). */
+  /** Raw local Z dimension from Pascal `roof-segment`. */
   depthM: number
   pitchRad: number
   overhangM: number
   wallHeightM: number
-  /** Optional XZ enclosed-footprint predicate for fallback synthesized roofs (VIS-02). */
+  /** True when synthesized as a partial/full fallback roof (explicit user roofs always dominate fallbacks). */
+  isFallback?: boolean
+  /** Optional XZ enclosed-footprint predicate for fallback synthesized roofs (VIS-02 / VIS-V3-06). */
   footprintClip?: (x: number, z: number, marginM?: number) => boolean
+}
+
+type CanonicalRoofFrame = {
+  effYaw: number
+  effWidth: number
+  effDepth: number
+  halfW: number
+  halfRun: number
+  riseM: number
+  effSlopeTan: number
+  /** True when `hip`/`dutch`/`mansard` had `widthM < depthM` and rotated +90 deg so ridge runs along Z. */
+  swappedAxes: boolean
+}
+
+/**
+ * Canonical Pascal `roof-segment` local frame normalization:
+ * - `gable` & `gambrel`: ridge along local X (`widthM`), `halfRun = depthM / 2`.
+ * - `hip`, `dutch`, `mansard`: when `widthM < depthM`, ridge runs along local Z
+ *   (rotate frame by `+Math.PI / 2`, swap `effWidth = depthM`, `effDepth = widthM`).
+ * - `conical`: circular/octagonal turret with `radius = min(widthM, depthM) / 2`.
+ * - `flat` (or `pitchRad <= 1e-4`): `riseM = 0`.
+ * - `shed`: single slope from `-depthM/2` (high) to `+depthM/2` (low).
+ */
+function resolveCanonicalRoofFrame(seg: ExtractedRoofSegment): CanonicalRoofFrame {
+  const isRidgeFollowsLongAxis =
+    seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard'
+  const swappedAxes = isRidgeFollowsLongAxis && seg.widthM < seg.depthM
+  const effYaw = swappedAxes ? seg.yaw + Math.PI / 2 : seg.yaw
+  const effWidth = swappedAxes ? seg.depthM : seg.widthM
+  const effDepth = swappedAxes ? seg.widthM : seg.depthM
+  const halfW = effWidth / 2
+  const halfRun = effDepth / 2
+  const slopeTan = Math.tan(seg.pitchRad)
+
+  if (seg.roofType === 'flat' || seg.pitchRad <= 1e-4) {
+    return { effYaw, effWidth, effDepth, halfW, halfRun, riseM: 0, effSlopeTan: 0, swappedAxes }
+  }
+  if (seg.roofType === 'shed') {
+    const riseM = effDepth * slopeTan
+    return { effYaw, effWidth, effDepth, halfW, halfRun, riseM, effSlopeTan: slopeTan, swappedAxes }
+  }
+  if (seg.roofType === 'conical') {
+    const radius = Math.min(seg.widthM, seg.depthM) / 2
+    const riseM = Math.max(0.25, radius * slopeTan)
+    return {
+      effYaw: seg.yaw,
+      effWidth: seg.widthM,
+      effDepth: seg.depthM,
+      halfW: radius,
+      halfRun: radius,
+      riseM,
+      effSlopeTan: riseM / Math.max(0.1, radius),
+      swappedAxes: false,
+    }
+  }
+  if (seg.roofType === 'mansard') {
+    const inset = Math.min(effWidth, effDepth) * 0.18
+    const riseM = Math.min(2.2, Math.max(0.25, inset * slopeTan))
+    return {
+      effYaw,
+      effWidth,
+      effDepth,
+      halfW,
+      halfRun,
+      riseM,
+      effSlopeTan: riseM / Math.max(0.1, inset),
+      swappedAxes,
+    }
+  }
+  if (seg.roofType === 'dutch') {
+    const riseM = Math.max(0.25, Math.min(halfRun * slopeTan, halfRun * 1.35))
+    return {
+      effYaw,
+      effWidth,
+      effDepth,
+      halfW,
+      halfRun,
+      riseM,
+      effSlopeTan: riseM / Math.max(0.1, halfRun),
+      swappedAxes,
+    }
+  }
+  const riseM = Math.max(0.25, halfRun * slopeTan)
+  return {
+    effYaw,
+    effWidth,
+    effDepth,
+    halfW,
+    halfRun,
+    riseM,
+    effSlopeTan: riseM / Math.max(0.1, halfRun),
+    swappedAxes,
+  }
 }
 
 type Vec3Tuple = [number, number, number]
@@ -482,26 +576,48 @@ function subtractInterval1D(
  * if `(wx, wz)` falls outside `seg`'s plan footprint (including eave overhang).
  */
 function evaluateRoofSurfaceY(seg: ExtractedRoofSegment, wx: number, wz: number): number | null {
-  const cosR = Math.cos(seg.yaw)
-  const sinR = Math.sin(seg.yaw)
+  const frame = resolveCanonicalRoofFrame(seg)
+  const cosR = Math.cos(frame.effYaw)
+  const sinR = Math.sin(frame.effYaw)
   const dx = wx - seg.cx
   const dz = wz - seg.cz
-  // Exact inverse of Three.js Ry(yaw): (lx*cos + lz*sin, -lx*sin + lz*cos)
+  // Exact inverse of Three.js Ry(effYaw): (lx*cos + lz*sin, -lx*sin + lz*cos)
   const lx = dx * cosR - dz * sinR
   const lz = dx * sinR + dz * cosR
-  if (Math.abs(lx) > seg.widthM / 2 + 0.02 || Math.abs(lz) > seg.depthM / 2 + seg.overhangM + 0.02) {
+
+  if (seg.roofType === 'conical') {
+    const r = frame.halfRun
+    const dist = Math.hypot(lx, lz)
+    if (dist > r + seg.overhangM + 0.02) return null
+    return seg.cy + (r - dist) * frame.effSlopeTan
+  }
+
+  const hasEndOverhang =
+    seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard'
+  const padX = hasEndOverhang ? seg.overhangM + 0.02 : 0.02
+  if (Math.abs(lx) > frame.halfW + padX || Math.abs(lz) > frame.halfRun + seg.overhangM + 0.02) {
     return null
   }
-  const slopeTan = Math.tan(seg.pitchRad)
-  if (seg.roofType === 'shed') {
-    return seg.cy + (seg.depthM / 2 - lz) * slopeTan
+  if (seg.roofType === 'flat' || seg.pitchRad <= 1e-4) {
+    return seg.cy
   }
-  return seg.cy + (seg.depthM / 2 - Math.abs(lz)) * slopeTan
+  if (seg.roofType === 'shed') {
+    return seg.cy + (frame.halfRun - lz) * frame.effSlopeTan
+  }
+  if (seg.roofType === 'hip' || seg.roofType === 'dutch') {
+    const dX = frame.halfW - Math.abs(lx)
+    const dZ = frame.halfRun - Math.abs(lz)
+    return seg.cy + Math.min(frame.riseM, Math.min(dX, dZ) * frame.effSlopeTan)
+  }
+  if (seg.roofType === 'mansard') {
+    const dMin = Math.min(frame.halfW - Math.abs(lx), frame.halfRun - Math.abs(lz))
+    return seg.cy + Math.min(frame.riseM, dMin * frame.effSlopeTan)
+  }
+  return seg.cy + (frame.halfRun - Math.abs(lz)) * frame.effSlopeTan
 }
 
 function roofSegmentPeakY(seg: ExtractedRoofSegment): number {
-  const slopeTan = Math.tan(seg.pitchRad)
-  return seg.cy + (seg.roofType === 'shed' ? seg.depthM : seg.depthM / 2) * slopeTan
+  return seg.cy + resolveCanonicalRoofFrame(seg).riseM
 }
 
 /**
@@ -515,17 +631,21 @@ function findDominatingHostRoofs(
   allSegments: readonly ExtractedRoofSegment[],
 ): ExtractedRoofSegment[] {
   if (allSegments.length <= 1) return []
-  const segPeak = roofSegmentPeakY(seg)
-  const segArea = seg.widthM * seg.depthM
-  const cosR = Math.cos(seg.yaw)
-  const sinR = Math.sin(seg.yaw)
+  const segFrame = resolveCanonicalRoofFrame(seg)
+  const segPeak = seg.cy + segFrame.riseM
+  const segArea = segFrame.effWidth * segFrame.effDepth
+  const cosR = Math.cos(segFrame.effYaw)
+  const sinR = Math.sin(segFrame.effYaw)
   const hosts: ExtractedRoofSegment[] = []
 
   for (let oIdx = 0; oIdx < allSegments.length; oIdx++) {
     if (oIdx === segIdx) continue
     const other = allSegments[oIdx]!
-    const otherPeak = roofSegmentPeakY(other)
-    const otherArea = other.widthM * other.depthM
+    // Synthesized fallback roofs never clip explicit user-authored roof segments
+    if (!seg.isFallback && other.isFallback) continue
+    const otherFrame = resolveCanonicalRoofFrame(other)
+    const otherPeak = other.cy + otherFrame.riseM
+    const otherArea = otherFrame.effWidth * otherFrame.effDepth
     const dominates =
       otherPeak > segPeak + 0.04 ||
       (Math.abs(otherPeak - segPeak) <= 0.04 &&
@@ -535,9 +655,9 @@ function findDominatingHostRoofs(
     // Verify 2D plan overlap on a 5x5 grid over `seg`
     let overlaps = false
     for (let ix = -2; ix <= 2 && !overlaps; ix++) {
-      const lx = (seg.widthM / 2) * (ix / 2)
+      const lx = segFrame.halfW * (ix / 2)
       for (let iz = -2; iz <= 2 && !overlaps; iz++) {
-        const lz = (seg.depthM / 2) * (iz / 2)
+        const lz = segFrame.halfRun * (iz / 2)
         const wx = seg.cx + lx * cosR + lz * sinR
         const wz = seg.cz - lx * sinR + lz * cosR
         if (evaluateRoofSurfaceY(other, wx, wz) !== null) overlaps = true
@@ -648,9 +768,12 @@ function extractLevelRoofSegments(
   levelBaseY = 0,
 ): ExtractedRoofSegment[] {
   const out: ExtractedRoofSegment[] = []
+  const isUpperLevel = !isLowestWalledLevelInBuilding(nodes, levelId)
 
   for (const node of Object.values(nodes)) {
-    if (node.type !== 'roof-segment' || node.visible === false) continue
+    // Always frame architectural roof-segments even when their shingle shell is hidden (visible === false)
+    // in Framing X-Ray mode or persisted X-Ray scenes; structural roof framing has its own `visibleSystems.roof` toggle.
+    if (node.type !== 'roof-segment') continue
 
     const segPos = Array.isArray(node.position) ? (node.position as number[]) : [0, 0, 0]
     let px = typeof segPos[0] === 'number' ? segPos[0] : 0
@@ -658,8 +781,12 @@ function extractLevelRoofSegments(
     let pz = typeof segPos[2] === 'number' ? segPos[2] : 0
     let yaw = typeof node.rotation === 'number' ? node.rotation : 0
 
+    const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
+    const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
+
     let curParentId = typeof node.parentId === 'string' ? node.parentId : null
     let belongsHere = false
+    let wasAdoptedFromWallLessLevel = false
     for (let hop = 0; hop < 6 && curParentId; hop++) {
       if (!levelId || curParentId === levelId) {
         belongsHere = true
@@ -668,7 +795,12 @@ function extractLevelRoofSegments(
       const parent = nodes[curParentId]
       if (!parent) break
       if (parent.type === 'level') {
-        belongsHere = shouldAdoptWallLessRoofLevel(nodes, levelId, parent)
+        const absCos = Math.abs(Math.cos(yaw))
+        const absSin = Math.abs(Math.sin(yaw))
+        const halfX = (widthM * absCos + depthM * absSin) / 2
+        const halfZ = (widthM * absSin + depthM * absCos) / 2
+        belongsHere = shouldAdoptRoofSegmentOntoLevel(nodes, levelId, parent, px, pz, halfX, halfZ)
+        wasAdoptedFromWallLessLevel = belongsHere
         break
       }
       if (parent.type === 'roof') {
@@ -687,8 +819,6 @@ function extractLevelRoofSegments(
     }
     if (!belongsHere) continue
 
-    const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
-    const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
     const rawPitch = typeof node.pitch === 'number' && Number.isFinite(node.pitch) ? node.pitch : 26.57
     // Pascal roof-segment stores pitch in DEGREES (e.g. 26.57 for 6:12); handle radians if <= 1.4
     const pitchRad =
@@ -699,8 +829,17 @@ function extractLevelRoofSegments(
           : Math.min((65 * Math.PI) / 180, rawPitch)
     const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
     const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
-    // Seat roof eaves right on top of the level's double top plates and consistently honor segment knee-wall height
-    const cy = py > 0.05 ? py + segWallH : levelBaseY + defaultWallHeightM + segWallH
+
+    // VIS-V3-02 / Polish A: A roof-segment directly parented to a walled upper level renders in that
+    // level's local coordinate system at `py` (0 = top of the lower story's walls/columns), NEVER
+    // shifted up by `+defaultWallHeightM`. Only roofs adopted from a wall-less Roof level above
+    // (or placed on a ground-floor single-story level) seat on top of `defaultWallHeightM`.
+    const cy =
+      py > 0.05
+        ? py + segWallH
+        : !wasAdoptedFromWallLessLevel && isUpperLevel
+          ? levelBaseY + segWallH
+          : levelBaseY + defaultWallHeightM + segWallH
 
     out.push({
       cx: px,
@@ -722,6 +861,8 @@ function extractLevelRoofSegments(
 export type BuildingSkeletonOptions = {
   assembly: SceneNodeLike
   nodes: Readonly<Record<string, SceneNodeLike>>
+  /** Roof / ceiling IDs temporarily hidden by Framing X-Ray so structural roof framing remains rendered. */
+  xrayHiddenIds?: ReadonlySet<string>
 }
 
 export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group {
@@ -1091,13 +1232,40 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       }
     }
 
-    // IRC R302.11(2): Horizontal fire blocking every <= 10 ft on tall walls (> 10 ft)
+    // IRC R302.11(2): Horizontal fire blocking every <= 10 ft on tall walls (> 10 ft),
+    // split cleanly around door/window openings so firestop bands never cross storefront glazing (VIS-V3-07)
     if (showFirestop && wallH > TEN_FT_M) {
       const tiers = Math.floor(wallH / TEN_FT_M)
       for (let t = 1; t <= tiers; t++) {
         const fbY = baseY + t * TEN_FT_M
         if (fbY < doubleTopBottomY - 0.05) {
-          pushWallBox('firestop', sx, sz, ux, uz, nx, nz, rotY, wallLenM / 2, fbY, wallLenM - STUD_THICK_M * 4, PLATE_THICK_M * 1.1, studDepthM + 0.008)
+          let fbIntervals: Array<[number, number]> = [[STUD_THICK_M * 2, wallLenM - STUD_THICK_M * 2]]
+          for (const op of openings) {
+            const opBotY = baseY + op.sillYM - 0.04
+            const opTopY = baseY + op.headYM + 0.04
+            if (fbY >= opBotY && fbY <= opTopY) {
+              fbIntervals = subtractInterval1D(fbIntervals, op.uCenterM - op.widthM / 2, op.uCenterM + op.widthM / 2)
+            }
+          }
+          for (const [u0, u1] of fbIntervals) {
+            const spanM = u1 - u0
+            if (spanM < 0.12) continue
+            pushWallBox(
+              'firestop',
+              sx,
+              sz,
+              ux,
+              uz,
+              nx,
+              nz,
+              rotY,
+              (u0 + u1) / 2,
+              fbY,
+              spanM,
+              PLATE_THICK_M * 1.1,
+              studDepthM + 0.008,
+            )
+          }
         }
       }
     }
@@ -1293,19 +1461,51 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   // ============================================================================
   if (showRoof) {
     const levelBounds = computeLevelBounds(nodes, levelId)
-    let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM, levelBounds.baseElevationM)
+    const roofSegments = extractLevelRoofSegments(
+      nodes,
+      levelId,
+      defaultWallHeightM,
+      levelBounds.baseElevationM,
+    )
+    const explicitRoofSegments = [...roofSegments]
 
     const levelRtus = findLevelCommercialRtus(nodes, levelId)
 
     const isTruss =
       roofSystem === 'fink-truss' || roofSystem === 'scissor-truss' || roofSystem === 'attic-truss'
     const rafterSpacingM = (isTruss ? 24 : 16) * INCHES_TO_METERS
+    const studSpacingM = defaultSpacingIn * INCHES_TO_METERS
     const chordDepthM = (isTruss ? 5.5 : 7.25) * INCHES_TO_METERS
     const memberThickM = 0.0381
 
-    // Fallback when no roof-segment exists yet: synthesize commercial flat roof deck with RTU curb opening (VIS-04)
-    // OR footprint-clipped gable roofs seated on perimeter/tallest wall height (VIS-02), ONLY on the highest walled story.
-    if (roofSegments.length === 0 && walls.length >= 2 && isHighestWalledLevelInBuilding(nodes, levelId)) {
+    const isInsideRoofSet = (
+      segs: readonly ExtractedRoofSegment[],
+      x: number,
+      z: number,
+      extraMargin = 0.35,
+    ): boolean => {
+      for (const seg of segs) {
+        const cosR = Math.cos(seg.yaw)
+        const sinR = Math.sin(seg.yaw)
+        const dx = x - seg.cx
+        const dz = z - seg.cz
+        const lx = dx * cosR - dz * sinR
+        const lz = dx * sinR + dz * cosR
+        if (seg.roofType === 'conical') {
+          const r = Math.min(seg.widthM, seg.depthM) / 2
+          if (Math.hypot(lx, lz) <= Math.max(0.1, r + seg.overhangM + extraMargin)) return true
+        } else {
+          const halfX = Math.max(0.1, seg.widthM / 2 + seg.overhangM + extraMargin)
+          const halfZ = Math.max(0.1, seg.depthM / 2 + seg.overhangM + extraMargin)
+          if (Math.abs(lx) <= halfX && Math.abs(lz) <= halfZ) return true
+        }
+      }
+      return false
+    }
+
+    // Fallback when no roof-segment exists yet (VIS-02/VIS-04) OR when explicit roof-segments cover
+    // < 75% of a walled cluster's enclosed footprint on the highest walled story (VIS-V3-06).
+    if (walls.length >= 2 && isHighestWalledLevelInBuilding(nodes, levelId)) {
       const clusters = clusterLevelFootprints(nodes, levelId, 0.35)
       for (const env of clusters) {
         const clusterWalls = walls.filter((w) => {
@@ -1402,7 +1602,67 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           return false
         }
 
-        // VIS-04: Commercial flat/low-slope roof deck with framed RTU curb opening (double trimmers + double headers)
+        // VIS-V3-06 / Polish A: Only explicit roof segments seated near the TOP of this story's walls
+        // (`cy >= env.baseElevationM + roofSeatH - 0.6`) count as covering this story's top roof plane.
+        // Lower-story porch/wing roofs parented onto an upper story at y = 0 do NOT suppress the upper story's roof!
+        const topExplicitRoofs = explicitRoofSegments.filter(
+          (seg) => seg.cy >= env.baseElevationM + roofSeatH - 0.6,
+        )
+        if (topExplicitRoofs.length > 0) {
+          const gridStep = 0.8
+          let insideTotal = 0
+          let uncoveredCount = 0
+          let uMinX = Number.POSITIVE_INFINITY
+          let uMaxX = Number.NEGATIVE_INFINITY
+          let uMinZ = Number.POSITIVE_INFINITY
+          let uMaxZ = Number.NEGATIVE_INFINITY
+          for (let gx = cMinX + gridStep * 0.5; gx <= cMaxX - 0.1; gx += gridStep) {
+            for (let gz = cMinZ + gridStep * 0.5; gz <= cMaxZ - 0.1; gz += gridStep) {
+              if (!isInsideClusterFootprint(gx, gz, 0)) continue
+              insideTotal += 1
+              if (!isInsideRoofSet(topExplicitRoofs, gx, gz, 0.35)) {
+                uncoveredCount += 1
+                if (gx < uMinX) uMinX = gx
+                if (gx > uMaxX) uMaxX = gx
+                if (gz < uMinZ) uMinZ = gz
+                if (gz > uMaxZ) uMaxZ = gz
+              }
+            }
+          }
+          const uncoveredRatio = insideTotal > 0 ? uncoveredCount / insideTotal : 0
+          if (
+            uncoveredRatio > 0.25 &&
+            Number.isFinite(uMinX) &&
+            uMaxX - uMinX >= 2.0 &&
+            uMaxZ - uMinZ >= 2.0
+          ) {
+            const fMinX = Math.max(cMinX, uMinX - gridStep * 0.5)
+            const fMaxX = Math.min(cMaxX, uMaxX + gridStep * 0.5)
+            const fMinZ = Math.max(cMinZ, uMinZ - gridStep * 0.5)
+            const fMaxZ = Math.min(cMaxZ, uMaxZ + gridStep * 0.5)
+            const fSpanX = fMaxX - fMinX
+            const fSpanZ = fMaxZ - fMinZ
+            const ridgeAlongX = fSpanX >= fSpanZ
+            roofSegments.push({
+              cx: (fMinX + fMaxX) / 2,
+              cy: env.baseElevationM + roofSeatH,
+              cz: (fMinZ + fMaxZ) / 2,
+              yaw: ridgeAlongX ? 0 : Math.PI / 2,
+              roofType: 'gable',
+              widthM: ridgeAlongX ? fSpanX : fSpanZ,
+              depthM: ridgeAlongX ? fSpanZ : fSpanX,
+              pitchRad: Math.atan(6 / 12),
+              overhangM: 0.4,
+              wallHeightM: 0,
+              isFallback: true,
+              footprintClip: (x, z, margin = 0) =>
+                isInsideClusterFootprint(x, z, margin) && !isInsideRoofSet(topExplicitRoofs, x, z, -0.15),
+            })
+          }
+          continue
+        }
+
+        // VIS-04 / VIS-V3-11 / Polish C: Commercial flat/low-slope roof deck (24" OC joists) with framed RTU curb opening
         const clusterRtus = levelRtus.filter(
           (rtu) =>
             Array.isArray(rtu.position) &&
@@ -1416,18 +1676,35 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const deckBaseY = env.baseElevationM + roofSeatH
           const flatDepthM = Math.min(spanX, spanZ) > 5.5 ? 0.2858 : 0.2413
           const deckCenterY = deckBaseY + flatDepthM / 2
-          const flatSpacingM = 16 * INCHES_TO_METERS
+          const flatSpacingM = 24 * INCHES_TO_METERS
           const spanAlongX = spanX <= spanZ
           const rotY = spanAlongX ? 0 : Math.PI / 2
 
           // Build curb opening boxes in XZ around every RTU so zero roof joists slice through the RTU
           const rtuOpenings = clusterRtus.map((rtu) => {
             const p = rtu.position!
-            const rot = typeof rtu.rotation === 'number' && Number.isFinite(rtu.rotation) ? rtu.rotation : 0
-            const w = typeof rtu.widthM === 'number' && rtu.widthM > 0.2 ? rtu.widthM : 1.55
-            const d = typeof rtu.depthM === 'number' && rtu.depthM > 0.2 ? rtu.depthM : 1.15
-            const halfX = (Math.abs(w * Math.cos(rot)) + Math.abs(d * Math.sin(rot))) / 2 + 0.08
-            const halfZ = (Math.abs(w * Math.sin(rot)) + Math.abs(d * Math.cos(rot))) / 2 + 0.08
+            const rot =
+              typeof rtu.rotation === 'number' && Number.isFinite(rtu.rotation)
+                ? rtu.rotation
+                : Array.isArray(rtu.rotation) &&
+                    typeof rtu.rotation[1] === 'number' &&
+                    Number.isFinite(rtu.rotation[1])
+                  ? rtu.rotation[1]
+                  : 0
+            const w =
+              typeof rtu.widthM === 'number' && rtu.widthM > 0.2
+                ? rtu.widthM
+                : typeof rtu.width === 'number' && rtu.width > 0.2
+                  ? rtu.width
+                  : 1.55
+            const d =
+              typeof rtu.depthM === 'number' && rtu.depthM > 0.2
+                ? rtu.depthM
+                : typeof rtu.depth === 'number' && rtu.depth > 0.2
+                  ? rtu.depth
+                  : 1.15
+            const halfX = (Math.abs(w * Math.cos(rot)) + Math.abs(d * Math.sin(rot))) / 2 + 0.12
+            const halfZ = (Math.abs(w * Math.sin(rot)) + Math.abs(d * Math.cos(rot))) / 2 + 0.12
             return {
               minX: p[0] - halfX,
               maxX: p[0] + halfX,
@@ -1463,13 +1740,19 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
                 const oMaxTrans = spanAlongX ? op.maxZ : op.maxX
                 const oMinSpan = spanAlongX ? op.minX : op.minZ
                 const oMaxSpan = spanAlongX ? op.maxX : op.maxZ
-                // Exclude joists whose centerline falls inside the opening or overlaps the double trimmers
-                if (pos > oMinTrans - memberThickM * 2.5 && pos < oMaxTrans + memberThickM * 2.5) {
+                // Skip field joists colliding with full-span double LVL trimmer bands; split tail joists cleanly at double headers
+                const inLeftTrimmer = pos >= oMinTrans - memberThickM * 2.5 && pos <= oMinTrans + memberThickM * 0.5
+                const inRightTrimmer = pos >= oMaxTrans - memberThickM * 0.5 && pos <= oMaxTrans + memberThickM * 2.5
+                if (inLeftTrimmer || inRightTrimmer) {
+                  intervals = []
+                  break
+                }
+                if (pos > oMinTrans + memberThickM * 0.5 && pos < oMaxTrans - memberThickM * 0.5) {
                   intervals = subtractInterval1D(intervals, oMinSpan - memberThickM * 2, oMaxSpan + memberThickM * 2)
                 }
               }
               for (const [a0, a1] of intervals) {
-                const jLen = a1 - a0 - memberThickM * 2
+                const jLen = a1 - a0 - memberThickM
                 if (jLen < 0.2) continue
                 const mid = (a0 + a1) / 2
                 const cx = spanAlongX ? mid : pos
@@ -1576,6 +1859,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           pitchRad: Math.atan(6 / 12),
           overhangM: 0.4,
           wallHeightM: 0,
+          isFallback: true,
           footprintClip: hasFootprintClip ? isInsideClusterFootprint : undefined,
         })
       }
@@ -1584,10 +1868,16 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     for (let segIdx = 0; segIdx < roofSegments.length; segIdx++) {
       const seg = roofSegments[segIdx]!
       if (seg.widthM < 0.3 || seg.depthM < 0.3) continue
-      const cosR = Math.cos(seg.yaw)
-      const sinR = Math.sin(seg.yaw)
-      // Pascal roof-segment local frame: +X = ridge direction (width), ±Z = slopes (depth)
-      // Three.js Ry(yaw): (lx, ly, lz) -> (lx*cos + lz*sin, ly, -lx*sin + lz*cos)
+      const frame = resolveCanonicalRoofFrame(seg)
+      const effYaw = frame.effYaw
+      const effWidth = frame.effWidth
+      const effDepth = frame.effDepth
+      const halfW = frame.halfW
+      const halfRun = frame.halfRun
+      const cosR = Math.cos(effYaw)
+      const sinR = Math.sin(effYaw)
+      // Canonical roof-segment local frame: +X = ridge direction (effWidth), ±Z = primary slopes (effDepth)
+      // Three.js Ry(effYaw): (lx, ly, lz) -> (lx*cos + lz*sin, ly, -lx*sin + lz*cos)
       const toWorld = (lx: number, ly: number, lz: number): [number, number, number] => [
         seg.cx + lx * cosR + lz * sinR,
         seg.cy + ly,
@@ -1595,7 +1885,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       ]
       const ridgeAxisWorld: [number, number, number] = [cosR, 0, -sinR]
       const slopeAxisWorld: [number, number, number] = [sinR, 0, cosR]
-      const slopeTan = Math.tan(seg.pitchRad)
+      const fpClip = seg.footprintClip
 
       // Detect dominating host roof planes (e.g. main gable hosting a perpendicular cross-gable or dormer)
       // so secondary roof rafters, ridge beam, webs & rake studs clip cleanly along California valley lines
@@ -1607,39 +1897,489 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         const hy = hostSurfaceYAt(pt[0], pt[2], hostRoofs)
         return hy === null || pt[1] >= hy - tol
       }
+      const inFootprint = (pt: readonly [number, number, number], marginM = 0.15): boolean =>
+        !fpClip || fpClip(pt[0], pt[2], marginM)
 
-      if (seg.roofType === 'shed') {
-        // Single sloping plane from -depth/2 (high wall) down to +depth/2 (low eave)
-        const riseM = seg.depthM * slopeTan
-        const count = Math.max(2, Math.floor(seg.widthM / rafterSpacingM) + 1)
-        for (let i = 0; i < count; i++) {
-          const lx = -seg.widthM / 2 + (seg.widthM * i) / Math.max(1, count - 1)
-          const pHigh = toWorld(lx, riseM + seg.overhangM * slopeTan, -seg.depthM / 2 - seg.overhangM)
-          const pLow = toWorld(lx, -seg.overhangM * slopeTan, seg.depthM / 2 + seg.overhangM)
-          const clipped = clipSegmentAboveHosts(pHigh, pLow, hostRoofs, 0.015)
-          if (!clipped) continue
-          pushStrut('lumber', clipped.start, clipped.end, chordDepthM, memberThickM, ridgeAxisWorld)
-          if (showConnectors) {
-            if (!clipped.clippedStart) {
-              boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM, -seg.depthM / 2 + 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
-            }
-            if (!clipped.clippedEnd) {
-              boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, seg.depthM / 2 - 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
+      const pushClippedStrut = (
+        bucket: BucketId,
+        pA: readonly [number, number, number],
+        pB: readonly [number, number, number],
+        depthM: number,
+        thickM: number,
+        sideHint: readonly [number, number, number],
+        fpMarginM = seg.overhangM,
+      ): boolean => {
+        const hostClip = clipSegmentAboveHosts(pA, pB, hostRoofs, 0.015)
+        if (!hostClip) return false
+        if (!fpClip) {
+          pushStrut(bucket, hostClip.start, hostClip.end, depthM, thickM, sideHint)
+          return true
+        }
+        const subSegs = clipSegmentToFootprint3D(
+          hostClip.start,
+          hostClip.end,
+          (x, z) => fpClip(x, z, fpMarginM),
+          0.14,
+        )
+        for (const ss of subSegs) {
+          pushStrut(bucket, ss.start, ss.end, depthM, thickM, sideHint)
+        }
+        return subSegs.length > 0
+      }
+
+      // Polish B: Frame Pascal's raised-heel perimeter knee-wall (`seg.wallHeightM > 0.03`) from
+      // y = -seg.wallHeightM (double top plate) up to y = 0 (eave bearing seat) so Framing X-Ray shows
+      // continuous wood-to-wood load transfer with zero air gap above the double top plate.
+      const emitRaisedHeelEdge = (
+        lx0: number,
+        lz0: number,
+        lx1: number,
+        lz1: number,
+        wallNormalHint: readonly [number, number, number],
+      ) => {
+        const wh = seg.wallHeightM
+        if (wh <= 0.03) return
+        const edgeLen = Math.hypot(lx1 - lx0, lz1 - lz0)
+        if (edgeLen < 0.08) return
+        const plateThick = 0.0381
+        const plateWidth = 0.089
+        const botPlateY = -wh + plateThick * 0.5
+        const topPlateY = -plateThick * 0.5
+        pushClippedStrut('lumber', toWorld(lx0, botPlateY, lz0), toWorld(lx1, botPlateY, lz1), plateThick, plateWidth, wallNormalHint, 0.15)
+        if (wh > plateThick * 1.6) {
+          pushClippedStrut('lumber', toWorld(lx0, topPlateY, lz0), toWorld(lx1, topPlateY, lz1), plateThick, plateWidth, wallNormalHint, 0.15)
+        }
+        const studBotY = -wh + plateThick
+        const studTopY = -plateThick
+        if (studTopY - studBotY > 0.04) {
+          const studCount = Math.max(2, Math.floor(edgeLen / studSpacingM) + 1)
+          const edgeAxisWorld: Vec3Tuple = [
+            ((lx1 - lx0) * cosR + (lz1 - lz0) * sinR) / edgeLen,
+            0,
+            (-(lx1 - lx0) * sinR + (lz1 - lz0) * cosR) / edgeLen,
+          ]
+          for (let si = 0; si < studCount; si++) {
+            const frac = si / Math.max(1, studCount - 1)
+            const sx = lx0 + (lx1 - lx0) * frac
+            const sz = lz0 + (lz1 - lz0) * frac
+            const pBot = toWorld(sx, studBotY, sz)
+            const pTop = toWorld(sx, studTopY, sz)
+            if (fpClip && !fpClip(pTop[0], pTop[2], 0.15)) continue
+            if (!isPointAboveHosts(pBot, 0.04) || !isPointAboveHosts(pTop, 0.04)) continue
+            pushStrut('lumber', pBot, pTop, plateWidth, memberThickM, edgeAxisWorld)
+          }
+        }
+      }
+
+      // 3a. FLAT ROOF (or zero-pitch segment): flat roof joists & perimeter rim boards at y = 0 (riseM = 0)
+      if (seg.roofType === 'flat' || seg.pitchRad <= 1e-4) {
+        const flatDepthM = Math.min(effWidth, effDepth) > 5.5 ? 0.2858 : 0.2413
+        const deckY = flatDepthM / 2
+        const cNW = toWorld(-halfW, deckY, -halfRun)
+        const cNE = toWorld(halfW, deckY, -halfRun)
+        const cSE = toWorld(halfW, deckY, halfRun)
+        const cSW = toWorld(-halfW, deckY, halfRun)
+        pushClippedStrut('osb-web', cNW, cNE, flatDepthM, memberThickM, slopeAxisWorld, 0.12)
+        pushClippedStrut('osb-web', cSW, cSE, flatDepthM, memberThickM, slopeAxisWorld, 0.12)
+        pushClippedStrut('osb-web', cNW, cSW, flatDepthM, memberThickM, ridgeAxisWorld, 0.12)
+        pushClippedStrut('osb-web', cNE, cSE, flatDepthM, memberThickM, ridgeAxisWorld, 0.12)
+
+        const spanAlongX = effWidth <= effDepth
+        const runSpan = spanAlongX ? effDepth : effWidth
+        const joistCount = Math.max(2, Math.floor(runSpan / rafterSpacingM) + 1)
+        for (let i = 1; i < joistCount - 1; i++) {
+          const offset = -runSpan / 2 + (runSpan * i) / Math.max(1, joistCount - 1)
+          const pA = spanAlongX
+            ? toWorld(-halfW + memberThickM, deckY, offset)
+            : toWorld(offset, deckY, -halfRun + memberThickM)
+          const pB = spanAlongX
+            ? toWorld(halfW - memberThickM, deckY, offset)
+            : toWorld(offset, deckY, halfRun - memberThickM)
+          const hint = spanAlongX ? slopeAxisWorld : ridgeAxisWorld
+          pushClippedStrut('lumber', pA, pB, flatDepthM, memberThickM, hint, 0.12)
+        }
+        emitRaisedHeelEdge(-halfW, -halfRun, halfW, -halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, halfRun, halfW, halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, -halfRun, -halfW, halfRun, ridgeAxisWorld)
+        emitRaisedHeelEdge(halfW, -halfRun, halfW, halfRun, ridgeAxisWorld)
+        continue
+      }
+
+      // 3b. CONICAL TURRET ROOF: segmented octagonal ring plate + central king post + 12-16 radial rafters
+      if (seg.roofType === 'conical') {
+        const radius = frame.halfRun
+        const riseM = frame.riseM
+        const eaveDropY = seg.overhangM * frame.effSlopeTan
+
+        // Octagonal wall ring plate at y = 0.04 + raised-heel octagonal drum knee-wall if wallHeightM > 0.03
+        const ringSides = 8
+        for (let s = 0; s < ringSides; s++) {
+          const a0 = (s * Math.PI * 2) / ringSides
+          const a1 = ((s + 1) * Math.PI * 2) / ringSides
+          const x0 = radius * Math.cos(a0)
+          const z0 = radius * Math.sin(a0)
+          const x1 = radius * Math.cos(a1)
+          const z1 = radius * Math.sin(a1)
+          const p0 = toWorld(x0, 0.04, z0)
+          const p1 = toWorld(x1, 0.04, z1)
+          const midA = (a0 + a1) * 0.5
+          const radialHint: Vec3Tuple = [
+            Math.cos(midA) * cosR + Math.sin(midA) * sinR,
+            0,
+            -Math.cos(midA) * sinR + Math.sin(midA) * cosR,
+          ]
+          pushClippedStrut('lumber', p0, p1, 0.076, 0.089, radialHint, 0.15)
+          emitRaisedHeelEdge(x0, z0, x1, z1, radialHint)
+        }
+
+        // Central king post from ring plane up to conical apex
+        const kingBot = toWorld(0, 0.04, 0)
+        const kingTop = toWorld(0, riseM, 0)
+        pushClippedStrut('lumber', kingBot, kingTop, 0.114, 0.114, ridgeAxisWorld, 0.15)
+
+        // 12-16 radial rafters from central apex down to circular eave overhang (ZERO rectangular overhang!)
+        const radialCount = Math.max(12, Math.min(16, Math.round((2 * Math.PI * radius) / rafterSpacingM)))
+        const pApex = toWorld(0, riseM, 0)
+        for (let k = 0; k < radialCount; k++) {
+          const theta = (k * Math.PI * 2) / radialCount
+          const ct = Math.cos(theta)
+          const st = Math.sin(theta)
+          const pEave = toWorld((radius + seg.overhangM) * ct, -eaveDropY, (radius + seg.overhangM) * st)
+          const tangentHint: Vec3Tuple = [
+            -st * cosR + ct * sinR,
+            0,
+            st * sinR + ct * cosR,
+          ]
+          const emitted = pushClippedStrut('lumber', pApex, pEave, chordDepthM, memberThickM, tangentHint, seg.overhangM)
+          if (showConnectors && emitted) {
+            const pTie = toWorld(radius * ct, 0.02, radius * st)
+            if (isPointAboveHosts(pTie, 0.06) && inFootprint(pTie, 0.25)) {
+              boxes.push({ bucket: 'galv-steel', center: pTie, size: [0.058, 0.14, 0.06], rotY: effYaw - theta })
             }
           }
         }
         continue
       }
 
-      // Gable / Hip: ridge along local X (widthM) at lz = 0; slopes face -Z and +Z (halfRun = depthM / 2)
-      const halfRun = seg.depthM / 2
-      const riseM = Math.max(0.25, halfRun * slopeTan)
+      // 3c. MANSARD ROOF: steep lower perimeter slopes around all 4 sides + flat/low-slope upper cap joists
+      if (seg.roofType === 'mansard') {
+        const inset = Math.min(effWidth, effDepth) * 0.18
+        const innerHalfW = Math.max(0.15, halfW - inset)
+        const innerHalfD = Math.max(0.15, halfRun - inset)
+        const riseM = frame.riseM
+        const eaveDropY = Math.min(0.45, seg.overhangM * frame.effSlopeTan)
+
+        // 4 corner mansard hip rafters
+        for (const sx of [-1, 1] as const) {
+          for (const sz of [-1, 1] as const) {
+            const pTop = toWorld(sx * innerHalfW, riseM, sz * innerHalfD)
+            const pBot = toWorld(sx * (halfW + seg.overhangM), -eaveDropY, sz * (halfRun + seg.overhangM))
+            const diagHint: Vec3Tuple = [
+              -sz * cosR + sx * sinR,
+              0,
+              sz * sinR + sx * cosR,
+            ]
+            pushClippedStrut('lumber', pTop, pBot, chordDepthM, memberThickM * 1.25, diagHint, seg.overhangM)
+          }
+        }
+
+        // Upper cap perimeter rim beams at y = riseM
+        const capNW = toWorld(-innerHalfW, riseM, -innerHalfD)
+        const capNE = toWorld(innerHalfW, riseM, -innerHalfD)
+        const capSE = toWorld(innerHalfW, riseM, innerHalfD)
+        const capSW = toWorld(-innerHalfW, riseM, innerHalfD)
+        pushClippedStrut('header-lvl', capNW, capNE, 0.18, 0.05, slopeAxisWorld, 0.15)
+        pushClippedStrut('header-lvl', capSW, capSE, 0.18, 0.05, slopeAxisWorld, 0.15)
+        pushClippedStrut('header-lvl', capNW, capSW, 0.18, 0.05, ridgeAxisWorld, 0.15)
+        pushClippedStrut('header-lvl', capNE, capSE, 0.18, 0.05, ridgeAxisWorld, 0.15)
+
+        // Steep lower perimeter rafters along -Z and +Z faces + flat upper deck joists across inner cap
+        const xCount = Math.max(2, Math.floor((innerHalfW * 2) / rafterSpacingM) + 1)
+        for (let i = 0; i < xCount; i++) {
+          const lx = -innerHalfW + (innerHalfW * 2 * i) / Math.max(1, xCount - 1)
+          const pTopN = toWorld(lx, riseM, -innerHalfD)
+          const pBotN = toWorld(lx, -eaveDropY, -(halfRun + seg.overhangM))
+          const pTopS = toWorld(lx, riseM, innerHalfD)
+          const pBotS = toWorld(lx, -eaveDropY, halfRun + seg.overhangM)
+          pushClippedStrut('lumber', pTopN, pBotN, chordDepthM, memberThickM, ridgeAxisWorld, seg.overhangM)
+          pushClippedStrut('lumber', pTopS, pBotS, chordDepthM, memberThickM, ridgeAxisWorld, seg.overhangM)
+          // Flat upper deck joist spanning inner cap
+          if (i > 0 && i < xCount - 1) {
+            pushClippedStrut(
+              'lumber',
+              toWorld(lx, riseM - 0.06, -innerHalfD + 0.03),
+              toWorld(lx, riseM - 0.06, innerHalfD - 0.03),
+              0.18,
+              memberThickM,
+              ridgeAxisWorld,
+              0.12,
+            )
+          }
+          // Ceiling joist at plate level
+          if (roofSystem !== 'ridge-beam-cathedral') {
+            pushClippedStrut(
+              'lumber',
+              toWorld(lx, 0.06, -halfRun),
+              toWorld(lx, 0.06, halfRun),
+              0.14,
+              memberThickM,
+              ridgeAxisWorld,
+              0.12,
+            )
+          }
+        }
+
+        // Steep lower perimeter rafters along -X and +X end faces
+        const zCount = Math.max(2, Math.floor((innerHalfD * 2) / rafterSpacingM) + 1)
+        for (let i = 0; i < zCount; i++) {
+          const lz = -innerHalfD + (innerHalfD * 2 * i) / Math.max(1, zCount - 1)
+          for (const sx of [-1, 1] as const) {
+            const pTop = toWorld(sx * innerHalfW, riseM, lz)
+            const pBot = toWorld(sx * (halfW + seg.overhangM), -eaveDropY, lz)
+            pushClippedStrut('lumber', pTop, pBot, chordDepthM, memberThickM, slopeAxisWorld, seg.overhangM)
+          }
+        }
+        emitRaisedHeelEdge(-halfW, -halfRun, halfW, -halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, halfRun, halfW, halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, -halfRun, -halfW, halfRun, ridgeAxisWorld)
+        emitRaisedHeelEdge(halfW, -halfRun, halfW, halfRun, ridgeAxisWorld)
+        continue
+      }
+
+      // 3d. SHED ROOF: single sloping plane from -depth/2 (high wall) down to +depth/2 (low eave)
+      if (seg.roofType === 'shed') {
+        const riseM = frame.riseM
+        const slopeTan = frame.effSlopeTan
+        const count = Math.max(2, Math.floor(effWidth / rafterSpacingM) + 1)
+        for (let i = 0; i < count; i++) {
+          const lx = -halfW + (effWidth * i) / Math.max(1, count - 1)
+          const pHigh = toWorld(lx, riseM + seg.overhangM * slopeTan, -halfRun - seg.overhangM)
+          const pLow = toWorld(lx, -seg.overhangM * slopeTan, halfRun + seg.overhangM)
+          const clipped = clipSegmentAboveHosts(pHigh, pLow, hostRoofs, 0.015)
+          if (!clipped) continue
+          pushStrut('lumber', clipped.start, clipped.end, chordDepthM, memberThickM, ridgeAxisWorld)
+          if (showConnectors) {
+            if (!clipped.clippedStart) {
+              boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM, -halfRun + 0.04), size: [0.056, 0.14, 0.06], rotY: effYaw })
+            }
+            if (!clipped.clippedEnd) {
+              boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, halfRun - 0.04), size: [0.056, 0.14, 0.06], rotY: effYaw })
+            }
+          }
+        }
+        emitRaisedHeelEdge(-halfW, -halfRun, halfW, -halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, halfRun, halfW, halfRun, slopeAxisWorld)
+        continue
+      }
+
+      // 3e. HIP & DUTCH ROOFS: canonical long-axis ridge inset by `hipInset = min(halfRun, halfW)`,
+      // 4 diagonal hip rafters, common rafters along ridge, and tapered jack rafters on both side & end slopes
+      if (seg.roofType === 'hip' || seg.roofType === 'dutch') {
+        const riseM = frame.riseM
+        const effSlopeTan = frame.effSlopeTan
+        const ridgeHalfThick = isTruss ? 0 : 0.0445
+        const eaveDropY = seg.overhangM * effSlopeTan
+        const hipInset = Math.min(halfRun, halfW)
+        const ridgeEndX = Math.max(0, halfW - hipInset)
+
+        // Ridge beam spanning ONLY [-ridgeEndX, +ridgeEndX] (zero ridge beam for square pyramid hip!)
+        if (ridgeEndX > 0.06) {
+          const ridgeTopStart = toWorld(-ridgeEndX, riseM, 0)
+          const ridgeTopEnd = toWorld(ridgeEndX, riseM, 0)
+          const ridgeClip = clipSegmentAboveHosts(ridgeTopStart, ridgeTopEnd, hostRoofs, 0.015)
+          if (ridgeClip && !isTruss && showBeams) {
+            const ridgeCenterWorld: [number, number, number] = [
+              (ridgeClip.start[0] + ridgeClip.end[0]) / 2,
+              (ridgeClip.start[1] + ridgeClip.end[1]) / 2 - 0.09,
+              (ridgeClip.start[2] + ridgeClip.end[2]) / 2,
+            ]
+            const hasPersistedRidge = persistedRidgeBeams.some((rb) => {
+              const bs = rb.start as Vec2 | undefined
+              const be = rb.end as Vec2 | undefined
+              if (!Array.isArray(bs) || !Array.isArray(be)) return false
+              const bdx = be[0] - bs[0]
+              const bdz = be[1] - bs[1]
+              const bLen = Math.hypot(bdx, bdz)
+              if (bLen < 0.2) return false
+              const dirDot = Math.abs((bdx / bLen) * ridgeAxisWorld[0] + (bdz / bLen) * ridgeAxisWorld[2])
+              if (dirDot < 0.85) return false
+              const bmx = (bs[0] + be[0]) / 2
+              const bmz = (bs[1] + be[1]) / 2
+              const ox = bmx - ridgeCenterWorld[0]
+              const oz = bmz - ridgeCenterWorld[2]
+              const alongDist = Math.abs(ox * ridgeAxisWorld[0] + oz * ridgeAxisWorld[2])
+              const perpDist = Math.abs(ox * slopeAxisWorld[0] + oz * slopeAxisWorld[2])
+              return perpDist <= 0.6 && alongDist <= Math.max(effWidth * 0.6, 1.5)
+            })
+            if (!hasPersistedRidge) {
+              const ridgeParts = fpClip
+                ? clipSegmentToFootprint3D(ridgeClip.start, ridgeClip.end, (x, z) => fpClip(x, z, 0.25), 0.12)
+                : [{ start: ridgeClip.start, end: ridgeClip.end }]
+              for (const rp of ridgeParts) {
+                const rLen = Math.hypot(rp.end[0] - rp.start[0], rp.end[1] - rp.start[1], rp.end[2] - rp.start[2])
+                if (rLen > 0.12) {
+                  boxes.push({
+                    bucket: 'header-lvl',
+                    center: [
+                      (rp.start[0] + rp.end[0]) / 2,
+                      (rp.start[1] + rp.end[1]) / 2 - 0.09,
+                      (rp.start[2] + rp.end[2]) / 2,
+                    ],
+                    size: [rLen, 0.24, 0.089],
+                    rotY: effYaw,
+                  })
+                }
+              }
+            }
+          }
+        }
+
+        // 4 diagonal hip rafters from ridge ends (±ridgeEndX, riseM, 0) through corners (±halfW, 0, ±halfRun) to overhang corners
+        for (const sx of [-1, 1] as const) {
+          for (const sz of [-1, 1] as const) {
+            const pHipTop = toWorld(sx * ridgeEndX, riseM, 0)
+            const pHipBot = toWorld(sx * (halfW + seg.overhangM), -eaveDropY, sz * (halfRun + seg.overhangM))
+            const hipPerpWorld: Vec3Tuple = [
+              -sz * cosR + sx * sinR,
+              0,
+              sz * sinR + sx * cosR,
+            ]
+            pushClippedStrut('lumber', pHipTop, pHipBot, chordDepthM * 1.15, memberThickM * 1.25, hipPerpWorld, seg.overhangM)
+          }
+        }
+
+        // Build sorted stations along local X: common stations across [-ridgeEndX, +ridgeEndX] + side-slope hip jacks
+        const xStations: number[] = []
+        if (ridgeEndX > 0.06) {
+          const commonCount = Math.max(2, Math.floor((ridgeEndX * 2) / rafterSpacingM) + 1)
+          for (let i = 0; i < commonCount; i++) {
+            xStations.push(-ridgeEndX + (ridgeEndX * 2 * i) / Math.max(1, commonCount - 1))
+          }
+        } else {
+          xStations.push(0)
+        }
+        for (let d = rafterSpacingM; d < hipInset - 0.14; d += rafterSpacingM) {
+          xStations.push(-(ridgeEndX + d), ridgeEndX + d)
+        }
+        xStations.sort((a, b) => a - b)
+
+        for (let si = 0; si < xStations.length; si++) {
+          const lx = xStations[si]!
+          const absLx = Math.abs(lx)
+          if (absLx <= ridgeEndX + 1e-4) {
+            // Common rafter station along the central ridge
+            const pPeakCenter = toWorld(lx, riseM, 0)
+            if (!isPointAboveHosts(pPeakCenter, 0.015)) continue
+            const pPeakN = toWorld(lx, riseM, -ridgeHalfThick)
+            const pPeakS = toWorld(lx, riseM, ridgeHalfThick)
+            const pEaveN = toWorld(lx, -eaveDropY, -(halfRun + seg.overhangM))
+            const pEaveS = toWorld(lx, -eaveDropY, halfRun + seg.overhangM)
+            const pWallN = toWorld(lx, 0.06, -halfRun)
+            const pWallS = toWorld(lx, 0.06, halfRun)
+
+            const emittedN = pushClippedStrut('lumber', pPeakN, pEaveN, chordDepthM, memberThickM, ridgeAxisWorld, seg.overhangM)
+            const emittedS = pushClippedStrut('lumber', pPeakS, pEaveS, chordDepthM, memberThickM, ridgeAxisWorld, seg.overhangM)
+
+            const ceilingAboveHosts =
+              !isOverFramed ||
+              (isPointAboveHosts(pWallN, 0.08) &&
+                isPointAboveHosts(pWallS, 0.08) &&
+                isPointAboveHosts(toWorld(lx, 0.06, 0), 0.08))
+            if (roofSystem !== 'ridge-beam-cathedral' && ceilingAboveHosts) {
+              pushClippedStrut('lumber', pWallN, pWallS, 0.14, memberThickM, ridgeAxisWorld, 0.12)
+            }
+            if (isTruss) {
+              const pPeak = toWorld(lx, riseM, 0)
+              const pMidN = toWorld(lx, riseM * 0.5, -halfRun * 0.5)
+              const pMidS = toWorld(lx, riseM * 0.5, halfRun * 0.5)
+              const pBotN = toWorld(lx, 0.06, -halfRun / 3)
+              const pBotS = toWorld(lx, 0.06, halfRun / 3)
+              pushClippedStrut('lumber', pBotN, pMidN, 0.089, memberThickM, ridgeAxisWorld, 0.12)
+              pushClippedStrut('lumber', pBotN, pPeak, 0.089, memberThickM, ridgeAxisWorld, 0.12)
+              pushClippedStrut('lumber', pBotS, pPeak, 0.089, memberThickM, ridgeAxisWorld, 0.12)
+              pushClippedStrut('lumber', pBotS, pMidS, 0.089, memberThickM, ridgeAxisWorld, 0.12)
+            } else if (roofSystem === 'stick-rafter' && si % 2 === 0 && halfRun > 1.2) {
+              const tieZ = halfRun * 0.34
+              const tieY = riseM * 0.66
+              pushClippedStrut('lumber', toWorld(lx, tieY, -tieZ), toWorld(lx, tieY, tieZ), 0.089, memberThickM, ridgeAxisWorld, 0.12)
+            }
+            if (showConnectors) {
+              const pTieN = toWorld(lx, 0.02, -halfRun + 0.04)
+              const pTieS = toWorld(lx, 0.02, halfRun - 0.04)
+              if (emittedN && isPointAboveHosts(pTieN, 0.06) && inFootprint(pTieN, 0.25)) {
+                boxes.push({ bucket: 'galv-steel', center: pTieN, size: [0.058, 0.14, 0.06], rotY: effYaw })
+              }
+              if (emittedS && isPointAboveHosts(pTieS, 0.06) && inFootprint(pTieS, 0.25)) {
+                boxes.push({ bucket: 'galv-steel', center: pTieS, size: [0.058, 0.14, 0.06], rotY: effYaw })
+              }
+            }
+          } else {
+            // Side-slope hip jack rafters strictly tapered to the diagonal hip plane (ZERO gable protrusion!)
+            const dX = halfW - absLx
+            if (dX < 0.14) continue
+            const lzHip = Math.max(0.02, halfRun - dX)
+            const yHip = dX * effSlopeTan
+            const pJackTopN = toWorld(lx, yHip, -lzHip)
+            const pJackBotN = toWorld(lx, -eaveDropY, -(halfRun + seg.overhangM))
+            const pJackTopS = toWorld(lx, yHip, lzHip)
+            const pJackBotS = toWorld(lx, -eaveDropY, halfRun + seg.overhangM)
+
+            const emittedN = pushClippedStrut('lumber', pJackTopN, pJackBotN, chordDepthM, memberThickM, ridgeAxisWorld, seg.overhangM)
+            const emittedS = pushClippedStrut('lumber', pJackTopS, pJackBotS, chordDepthM, memberThickM, ridgeAxisWorld, seg.overhangM)
+            if (roofSystem !== 'ridge-beam-cathedral' && yHip > 0.18) {
+              pushClippedStrut('lumber', toWorld(lx, 0.06, -halfRun + 0.08), toWorld(lx, 0.06, halfRun - 0.08), 0.14, memberThickM, ridgeAxisWorld, 0.12)
+            }
+            if (showConnectors) {
+              const pTieN = toWorld(lx, 0.02, -halfRun + 0.04)
+              const pTieS = toWorld(lx, 0.02, halfRun - 0.04)
+              if (emittedN && isPointAboveHosts(pTieN, 0.06) && inFootprint(pTieN, 0.25)) {
+                boxes.push({ bucket: 'galv-steel', center: pTieN, size: [0.058, 0.14, 0.06], rotY: effYaw })
+              }
+              if (emittedS && isPointAboveHosts(pTieS, 0.06) && inFootprint(pTieS, 0.25)) {
+                boxes.push({ bucket: 'galv-steel', center: pTieS, size: [0.058, 0.14, 0.06], rotY: effYaw })
+              }
+            }
+          }
+        }
+
+        // End-slope hip jack rafters at BOTH hip ends (spanning along local X from hip rafters down to ±halfW eaves)
+        const endZStations: number[] = [0]
+        for (let zOff = rafterSpacingM; zOff < halfRun - 0.14; zOff += rafterSpacingM) {
+          endZStations.push(-zOff, zOff)
+        }
+        for (const sx of [-1, 1] as const) {
+          for (const lz of endZStations) {
+            const dZ = halfRun - Math.abs(lz)
+            if (dZ < 0.14) continue
+            const lxHip = sx * (halfW - dZ)
+            const yHip = dZ * effSlopeTan
+            const pTop = toWorld(lxHip, yHip, lz)
+            const pBot = toWorld(sx * (halfW + seg.overhangM), -eaveDropY, lz)
+            const emitted = pushClippedStrut('lumber', pTop, pBot, chordDepthM, memberThickM, slopeAxisWorld, seg.overhangM)
+            if (showConnectors && emitted) {
+              const pTie = toWorld(sx * (halfW - 0.04), 0.02, lz)
+              if (isPointAboveHosts(pTie, 0.06) && inFootprint(pTie, 0.25)) {
+                boxes.push({ bucket: 'galv-steel', center: pTie, size: [0.058, 0.14, 0.06], rotY: effYaw + Math.PI / 2 })
+              }
+            }
+          }
+        }
+        emitRaisedHeelEdge(-halfW, -halfRun, halfW, -halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, halfRun, halfW, halfRun, slopeAxisWorld)
+        emitRaisedHeelEdge(-halfW, -halfRun, -halfW, halfRun, ridgeAxisWorld)
+        emitRaisedHeelEdge(halfW, -halfRun, halfW, halfRun, ridgeAxisWorld)
+        continue
+      }
+
+      // 3f. GABLE & GAMBREL ROOFS: ridge along local X (widthM) at lz = 0; slopes face -Z and +Z (halfRun = depthM / 2)
+      const riseM = frame.riseM
+      const slopeTan = frame.effSlopeTan
       const ridgeHalfThick = isTruss ? 0 : 0.0445 // rafters butt cleanly against ridge beam face
       const eaveDropY = seg.overhangM * slopeTan
 
       // Clip ridge line against any dominating host roof so over-framed ridges stop flush on the valley intersection
-      const ridgeTopStart = toWorld(-seg.widthM / 2, riseM, 0)
-      const ridgeTopEnd = toWorld(seg.widthM / 2, riseM, 0)
+      const ridgeTopStart = toWorld(-halfW, riseM, 0)
+      const ridgeTopEnd = toWorld(halfW, riseM, 0)
       const ridgeClip = clipSegmentAboveHosts(ridgeTopStart, ridgeTopEnd, hostRoofs, 0.015)
       if (!ridgeClip) continue
 
@@ -1666,14 +2406,14 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         const oz = bmz - ridgeCenterWorld[2]
         const alongDist = Math.abs(ox * ridgeAxisWorld[0] + oz * ridgeAxisWorld[2])
         const perpDist = Math.abs(ox * slopeAxisWorld[0] + oz * slopeAxisWorld[2])
-        return perpDist <= 0.6 && alongDist <= Math.max(seg.widthM * 0.6, 1.5)
+        return perpDist <= 0.6 && alongDist <= Math.max(effWidth * 0.6, 1.5)
       })
       if (!isTruss && showBeams && !hasPersistedRidge) {
-        const ridgeParts = seg.footprintClip
+        const ridgeParts = fpClip
           ? clipSegmentToFootprint3D(
               ridgeClip.start,
               ridgeClip.end,
-              (x, z) => seg.footprintClip!(x, z, 0.25),
+              (x, z) => fpClip(x, z, 0.25),
               0.12,
             )
           : [{ start: ridgeClip.start, end: ridgeClip.end }]
@@ -1692,7 +2432,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
                 (rp.start[2] + rp.end[2]) / 2,
               ],
               size: [rLen, 0.24, 0.089],
-              rotY: seg.yaw,
+              rotY: effYaw,
             })
           }
         }
@@ -1700,11 +2440,10 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
       const valleyPtsN: Vec3Tuple[] = []
       const valleyPtsS: Vec3Tuple[] = []
-      const fpClip = seg.footprintClip
 
-      const count = Math.max(2, Math.floor(seg.widthM / rafterSpacingM) + 1)
+      const count = Math.max(2, Math.floor(effWidth / rafterSpacingM) + 1)
       for (let i = 0; i < count; i++) {
-        const lx = -seg.widthM / 2 + (seg.widthM * i) / Math.max(1, count - 1)
+        const lx = -halfW + (effWidth * i) / Math.max(1, count - 1)
 
         // Skip stations whose ridge peak is buried completely underneath a dominating host roof
         const pPeakCenter = toWorld(lx, riseM, 0)
@@ -1813,21 +2552,20 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const pPeakPlate = toWorld(lx, riseM - 0.06, 0)
           const pHeelN = toWorld(lx, 0.07, -halfRun + 0.14)
           const pHeelS = toWorld(lx, 0.07, halfRun - 0.14)
-          const inFp = (pt: readonly [number, number, number]) => !fpClip || fpClip(pt[0], pt[2], 0.15)
-          if (isPointAboveHosts(pPeakPlate, 0.08) && inFp(pPeakPlate)) {
-            boxes.push({ bucket: 'galv-steel', center: pPeakPlate, size: [0.048, 0.14, 0.22], rotY: seg.yaw })
+          if (isPointAboveHosts(pPeakPlate, 0.08) && inFootprint(pPeakPlate, 0.15)) {
+            boxes.push({ bucket: 'galv-steel', center: pPeakPlate, size: [0.048, 0.14, 0.22], rotY: effYaw })
           }
-          if (isPointAboveHosts(pHeelN, 0.08) && inFp(pHeelN)) {
-            boxes.push({ bucket: 'galv-steel', center: pHeelN, size: [0.048, 0.10, 0.20], rotY: seg.yaw })
+          if (isPointAboveHosts(pHeelN, 0.08) && inFootprint(pHeelN, 0.15)) {
+            boxes.push({ bucket: 'galv-steel', center: pHeelN, size: [0.048, 0.10, 0.20], rotY: effYaw })
           }
-          if (isPointAboveHosts(pHeelS, 0.08) && inFp(pHeelS)) {
-            boxes.push({ bucket: 'galv-steel', center: pHeelS, size: [0.048, 0.10, 0.20], rotY: seg.yaw })
+          if (isPointAboveHosts(pHeelS, 0.08) && inFootprint(pHeelS, 0.15)) {
+            boxes.push({ bucket: 'galv-steel', center: pHeelS, size: [0.048, 0.10, 0.20], rotY: effYaw })
           }
-          if (isPointAboveHosts(pBotN, 0.05) && inFp(pBotN)) {
-            boxes.push({ bucket: 'galv-steel', center: pBotN, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+          if (isPointAboveHosts(pBotN, 0.05) && inFootprint(pBotN, 0.15)) {
+            boxes.push({ bucket: 'galv-steel', center: pBotN, size: [0.048, 0.11, 0.14], rotY: effYaw })
           }
-          if (isPointAboveHosts(pBotS, 0.05) && inFp(pBotS)) {
-            boxes.push({ bucket: 'galv-steel', center: pBotS, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+          if (isPointAboveHosts(pBotS, 0.05) && inFootprint(pBotS, 0.15)) {
+            boxes.push({ bucket: 'galv-steel', center: pBotS, size: [0.048, 0.11, 0.14], rotY: effYaw })
           }
         } else if (roofSystem === 'stick-rafter' && i % 2 === 0 && halfRun > 1.2) {
           // Upper-third collar tie per IRC R802.4.6 (only emit when fully clear above host roof & inside enclosed footprint)
@@ -1847,21 +2585,28 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           }
         }
 
-        // Gable-end vertical rake studs at exposed exterior gable ends (suppress interior valley throats where hostY > seg.cy + 0.12!)
-        if ((i === 0 || i === count - 1) && seg.roofType === 'gable') {
-          const gableStep = 16 * INCHES_TO_METERS
-          for (let gz = -halfRun + gableStep; gz < halfRun - 0.15; gz += gableStep) {
-            const studTopY = riseM * (1 - Math.abs(gz) / halfRun) - 0.06
+        // VIS-V3-08 / Polish B: Gable-end vertical rake studs at exposed exterior gable/gambrel ends
+        // extending continuously down to `-seg.wallHeightM` (resting directly on the double top plate!)
+        // up to the sloped rafter underside (while suppressing interior valley throats).
+        if ((i === 0 || i === count - 1) && (seg.roofType === 'gable' || seg.roofType === 'gambrel')) {
+          const rakeBotY = seg.wallHeightM > 0.03 ? -seg.wallHeightM : 0
+          let emittedAnyRakeStud = false
+          for (let gz = -halfRun + studSpacingM; gz <= halfRun - studSpacingM + 1e-4; gz += studSpacingM) {
+            const studTopY = riseM * (1 - Math.abs(gz) / halfRun) - chordDepthM * 0.5
+            if (studTopY - rakeBotY <= 0.18) continue
             const studTopWorld = toWorld(lx, studTopY, gz)
             if (fpClip && !fpClip(studTopWorld[0], studTopWorld[2], 0.15)) continue
+            if (!isPointAboveHosts(studTopWorld, 0.03)) continue
             const hostY = isOverFramed ? hostSurfaceYAt(studTopWorld[0], studTopWorld[2], hostRoofs) : null
             // If this gable end sits mid-slope above the host roof (interior valley termination), do NOT block the attic throat!
             // Keep exterior flush gable ends where hostY is null or sits right at eave/plate level (hostY <= seg.cy + 0.12).
             if (hostY !== null && hostY > seg.cy + 0.12) continue
-            const studBotLocalY = 0.08
-            if (studTopY - studBotLocalY > 0.14) {
-              pushStrut('lumber', toWorld(lx, studBotLocalY, gz), studTopWorld, 0.089, memberThickM, ridgeAxisWorld)
-            }
+            pushStrut('lumber', toWorld(lx, rakeBotY, gz), studTopWorld, 0.089, memberThickM, ridgeAxisWorld)
+            emittedAnyRakeStud = true
+          }
+          if (seg.wallHeightM > 0.03 && emittedAnyRakeStud) {
+            const botPlateY = -seg.wallHeightM + 0.019
+            pushClippedStrut('lumber', toWorld(lx, botPlateY, -halfRun), toWorld(lx, botPlateY, halfRun), 0.0381, 0.089, ridgeAxisWorld, 0.15)
           }
         }
 
@@ -1875,7 +2620,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
             (!fpClip || fpClip(pTieN[0], pTieN[2], 0.25)) &&
             (!isOverFramed || (!clipN.clippedEnd && isPointAboveHosts(pTieN, 0.06)))
           ) {
-            boxes.push({ bucket: 'galv-steel', center: pTieN, size: [0.058, 0.14, 0.06], rotY: seg.yaw })
+            boxes.push({ bucket: 'galv-steel', center: pTieN, size: [0.058, 0.14, 0.06], rotY: effYaw })
           }
           if (
             emittedS &&
@@ -1883,10 +2628,14 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
             (!fpClip || fpClip(pTieS[0], pTieS[2], 0.25)) &&
             (!isOverFramed || (!clipS.clippedEnd && isPointAboveHosts(pTieS, 0.06)))
           ) {
-            boxes.push({ bucket: 'galv-steel', center: pTieS, size: [0.058, 0.14, 0.06], rotY: seg.yaw })
+            boxes.push({ bucket: 'galv-steel', center: pTieS, size: [0.058, 0.14, 0.06], rotY: effYaw })
           }
         }
       }
+
+      // Polish B: Raised-heel eave knee-walls along both gable/gambrel bearing eaves when `wallHeightM > 0.03`
+      emitRaisedHeelEdge(-halfW, -halfRun, halfW, -halfRun, slopeAxisWorld)
+      emitRaisedHeelEdge(-halfW, halfRun, halfW, halfRun, slopeAxisWorld)
 
       // Emit diagonal California Over-Frame Valley Sleepers / Valley Rafters joining the clipped jack rafters
       // cleanly from the low eave valley corner up to every ridge-to-host apex (handles one-sided, two-sided

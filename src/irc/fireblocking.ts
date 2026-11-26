@@ -12,6 +12,7 @@
  * - R302.12.1:  Combustible attic / concealed roof draftstopping (compartments <= 3,000 sq ft)
  */
 
+import { extractWallOpenings, resolveWallHeightM } from './openings'
 import {
   FIRESTOP_RULES,
   type FirestopKind,
@@ -23,6 +24,23 @@ import {
   type Vec3,
   belongsToLevel,
 } from './tables'
+
+function subtractInterval1D(
+  intervals: ReadonlyArray<readonly [number, number]>,
+  cutMin: number,
+  cutMax: number,
+): Array<[number, number]> {
+  const out: Array<[number, number]> = []
+  for (const [a, b] of intervals) {
+    if (cutMax <= a || cutMin >= b) {
+      out.push([a, b])
+    } else {
+      if (cutMin > a) out.push([a, cutMin])
+      if (cutMax < b) out.push([cutMax, b])
+    }
+  }
+  return out
+}
 
 export type DerivedFirestopSpec = {
   id: string
@@ -89,30 +107,55 @@ export function deriveRequiredFirestops(params: {
   // 1. IRC R302.11(2): Tall walls (> 10 ft = 3.048 m) require horizontal fire blocking every <= 10 ft
   const TEN_FT_M = 10 * 12 * INCHES_TO_METERS
   for (const wall of walls) {
-    const h = typeof wall.height === 'number' ? wall.height : 2.7432
+    const h = resolveWallHeightM(nodes, wall, 2.7432)
     const baseY = typeof wall.elevation === 'number' ? wall.elevation : 0
     const thick = typeof wall.thickness === 'number' ? wall.thickness : 0.14
     const start = wall.start!
     const end = wall.end!
+    const lenM = Math.hypot(end[0] - start[0], end[1] - start[1])
+    if (!Number.isFinite(lenM) || lenM < 0.05) continue
+    const ux = (end[0] - start[0]) / lenM
+    const uz = (end[1] - start[1]) / lenM
+    const wallOpenings = h > TEN_FT_M + 0.005 || lenM > TEN_FT_M + 0.02 ? extractWallOpenings(nodes, wall) : []
 
     if (h > TEN_FT_M + 0.005) {
       const tiers = Math.floor((h - 0.005) / TEN_FT_M)
       for (let tier = 1; tier <= tiers; tier++) {
         const y = baseY + tier * TEN_FT_M
-        out.push({
-          id: `fs_wall10_${seq++}`,
-          firestopKind: 'wall-vertical-10ft',
-          material: '2x-lumber',
-          codeRef: FIRESTOP_RULES['wall-vertical-10ft'].codeRef,
-          label: `R302.11(2) Wall Fire Blocking @ ${tier * 10} ft (${wall.id})`,
-          start,
-          end,
-          elevationY: Number(y.toFixed(3)),
-          heightM: 1.5 * INCHES_TO_METERS,
-          thicknessM: Math.max(0.089, thick - 0.025),
-          hostWallId: wall.id,
-          levelId,
-        })
+        // Split horizontal 10 ft firestop run across any wall opening whose vertical span crosses `y`
+        let intervals: Array<[number, number]> = [[0, lenM]]
+        for (const op of wallOpenings) {
+          const opBotY = baseY + op.sillYM - 0.04
+          const opTopY = baseY + op.headYM + 0.04
+          if (y >= opBotY && y <= opTopY) {
+            intervals = subtractInterval1D(intervals, op.uCenterM - op.widthM / 2, op.uCenterM + op.widthM / 2)
+          }
+        }
+        for (const [u0, u1] of intervals) {
+          if (u1 - u0 < 0.15) continue
+          const segStart: Vec2 = [
+            Number((start[0] + ux * u0).toFixed(4)),
+            Number((start[1] + uz * u0).toFixed(4)),
+          ]
+          const segEnd: Vec2 = [
+            Number((start[0] + ux * u1).toFixed(4)),
+            Number((start[1] + uz * u1).toFixed(4)),
+          ]
+          out.push({
+            id: `fs_wall10_${seq++}`,
+            firestopKind: 'wall-vertical-10ft',
+            material: '2x-lumber',
+            codeRef: FIRESTOP_RULES['wall-vertical-10ft'].codeRef,
+            label: `R302.11(2) Wall Fire Blocking @ ${tier * 10} ft (${wall.id})`,
+            start: segStart,
+            end: segEnd,
+            elevationY: Number(y.toFixed(3)),
+            heightM: 1.5 * INCHES_TO_METERS,
+            thicknessM: Math.max(0.089, thick - 0.025),
+            hostWallId: wall.id,
+            levelId,
+          })
+        }
       }
     }
 
@@ -120,17 +163,19 @@ export function deriveRequiredFirestops(params: {
     const isFurred =
       wall.furred === true ||
       (typeof wall.name === 'string' && /furr|masonry|basement/i.test(wall.name))
-    const lenM = Math.hypot(end[0] - start[0], end[1] - start[1])
     if (isFurred && lenM > TEN_FT_M + 0.02) {
-      const ux = (end[0] - start[0]) / lenM
-      const uz = (end[1] - start[1]) / lenM
       const nx = -uz
       const nz = ux
       const halfDepth = Math.max(0.038, thick / 2)
       const divisions = Math.floor((lenM - 0.02) / TEN_FT_M)
       for (let d = 1; d <= divisions; d++) {
-        const t = (d * TEN_FT_M) / lenM
+        const uDiv = d * TEN_FT_M
+        const t = uDiv / lenM
         if (t >= 0.98) continue
+        // Skip vertical fireblock division if it lands inside a wall opening
+        if (wallOpenings.some((op) => uDiv >= op.uCenterM - op.widthM / 2 && uDiv <= op.uCenterM + op.widthM / 2)) {
+          continue
+        }
         const px = start[0] + (end[0] - start[0]) * t
         const pz = start[1] + (end[1] - start[1]) * t
         out.push({
@@ -259,7 +304,7 @@ export function deriveRequiredFirestops(params: {
   const levelBaseY = wallBases.length > 0 ? Math.min(...wallBases) : 0
   const maxWallTopY = walls.reduce((maxTop, w) => {
     const base = typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0
-    const h = typeof w.height === 'number' && w.height > 0 ? w.height : 2.7432
+    const h = resolveWallHeightM(nodes, w, 2.7432)
     return Math.max(maxTop, base + h)
   }, 0)
   const levelCeilingY = maxWallTopY > levelBaseY ? maxWallTopY : levelBaseY + 2.7432

@@ -955,6 +955,56 @@ export function resolveHoldDownUpliftLbs(node: SceneNodeLike): number {
 }
 
 /**
+ * Exact 2D segment vs. axis-aligned bounding box intersection test in XZ.
+ * Used for per-segment roof adoption and upper-level underlying-wall checks.
+ */
+export function segmentIntersectsAabb2D(
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  minX: number,
+  maxX: number,
+  minZ: number,
+  maxZ: number,
+): boolean {
+  const wMinX = Math.min(ax, bx)
+  const wMaxX = Math.max(ax, bx)
+  const wMinZ = Math.min(az, bz)
+  const wMaxZ = Math.max(az, bz)
+  if (wMaxX < minX || wMinX > maxX || wMaxZ < minZ || wMinZ > maxZ) return false
+
+  let tMin = 0
+  let tMax = 1
+  const dx = bx - ax
+  const dz = bz - az
+
+  if (Math.abs(dx) < 1e-9) {
+    if (ax < minX || ax > maxX) return false
+  } else {
+    let t1 = (minX - ax) / dx
+    let t2 = (maxX - ax) / dx
+    if (t1 > t2) [t1, t2] = [t2, t1]
+    tMin = Math.max(tMin, t1)
+    tMax = Math.min(tMax, t2)
+    if (tMin > tMax) return false
+  }
+
+  if (Math.abs(dz) < 1e-9) {
+    if (az < minZ || az > maxZ) return false
+  } else {
+    let t1 = (minZ - az) / dz
+    let t2 = (maxZ - az) / dz
+    if (t1 > t2) [t1, t2] = [t2, t1]
+    tMin = Math.max(tMin, t1)
+    tMax = Math.min(tMax, t2)
+    if (tMin > tMax) return false
+  }
+
+  return tMax >= 0 && tMin <= 1
+}
+
+/**
  * Determine whether a wall-less roof level should be adopted onto `targetLevelId`
  * (the highest walled level in the same building at or below the roof level).
  */
@@ -994,6 +1044,81 @@ export function shouldAdoptWallLessRoofLevel(
   const hostLevel =
     belowRoof.length > 0 ? belowRoof[belowRoof.length - 1]! : siblingWalledLevels[siblingWalledLevels.length - 1]!
   return hostLevel.id === targetLevelId
+}
+
+/**
+ * Per-segment wall-less roof level adoption: picks the highest walled level at or below
+ * `roofLevel` whose visible walls overlap the segment's XZ bounding box (padded by 0.8 m),
+ * falling back to `shouldAdoptWallLessRoofLevel` only when no walled level overlaps.
+ * Ensures 1-story wing roofs placed on a wall-less Roof level seat onto the 1st-floor wing
+ * walls instead of floating at 2nd-floor eave elevation.
+ */
+export function shouldAdoptRoofSegmentOntoLevel(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  targetLevelId: string,
+  roofLevel: SceneNodeLike,
+  segCenterX: number,
+  segCenterZ: number,
+  halfX: number,
+  halfZ: number,
+): boolean {
+  const targetLevel = nodes[targetLevelId]
+  if (!targetLevel) return false
+  if (
+    typeof targetLevel.parentId === 'string' &&
+    typeof roofLevel.parentId === 'string' &&
+    targetLevel.parentId !== roofLevel.parentId
+  ) {
+    return false
+  }
+  const allValues = Object.values(nodes)
+  const roofLevelHasWalls = allValues.some(
+    (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, roofLevel.id),
+  )
+  if (roofLevelHasWalls) return false
+
+  const roofOrder = levelSortOrder(roofLevel)
+  const padM = 0.8
+  const minX = segCenterX - halfX - padM
+  const maxX = segCenterX + halfX + padM
+  const minZ = segCenterZ - halfZ - padM
+  const maxZ = segCenterZ + halfZ + padM
+
+  const siblingWalledLevels = allValues
+    .filter(
+      (n) =>
+        n.type === 'level' &&
+        n.id !== roofLevel.id &&
+        n.parentId === roofLevel.parentId &&
+        allValues.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id)),
+    )
+    .sort((a, b) => levelSortOrder(a) - levelSortOrder(b))
+
+  if (siblingWalledLevels.length === 0) return false
+  const belowRoof = siblingWalledLevels.filter((l) => levelSortOrder(l) <= roofOrder)
+  const candidates = belowRoof.length > 0 ? belowRoof : siblingWalledLevels
+
+  const overlapping = candidates.filter((lvl) =>
+    allValues.some((w) => {
+      if (w.type !== 'wall' || w.visible === false || !Array.isArray(w.start) || !Array.isArray(w.end)) return false
+      if (!belongsToLevel(nodes, w, lvl.id)) return false
+      return segmentIntersectsAabb2D(
+        Number(w.start[0]),
+        Number(w.start[1]),
+        Number(w.end[0]),
+        Number(w.end[1]),
+        minX,
+        maxX,
+        minZ,
+        maxZ,
+      )
+    }),
+  )
+
+  if (overlapping.length > 0) {
+    return overlapping[overlapping.length - 1]!.id === targetLevelId
+  }
+  return shouldAdoptWallLessRoofLevel(nodes, targetLevelId, roofLevel)
 }
 
 export function isCommercialRtuEquipment(node: SceneNodeLike): boolean {

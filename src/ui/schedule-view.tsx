@@ -17,6 +17,7 @@ import { generateStructuralSchedulePack } from '../irc/schedule'
 import type { SceneNodeLike } from '../irc/tables'
 import {
   type StructuralScheduleTab,
+  computeSceneIdentityKey,
   useStructuralUi,
 } from './store'
 
@@ -24,6 +25,9 @@ export default function StructuralScheduleView() {
   const nodes = useScene((s) => s.nodes)
   const setSelection = useViewer((s) => s.setSelection)
   const editedDesignParams = useStructuralUi((s) => s.editedDesignParams)
+  const xrayHiddenNodeIds = useStructuralUi((s) => s.xrayHiddenNodeIds)
+  const lastSceneKey = useStructuralUi((s) => s.lastSceneKey)
+  const syncSceneKey = useStructuralUi((s) => s.syncSceneKey)
   const activeTab = useStructuralUi((s) => s.activeTab)
   const setActiveTab = useStructuralUi((s) => s.setActiveTab)
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null)
@@ -36,13 +40,39 @@ export default function StructuralScheduleView() {
   }, [])
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
+  const sceneKey = useMemo(() => computeSceneIdentityKey(record), [record])
+  useEffect(() => {
+    if (sceneKey) syncSceneKey(sceneKey)
+  }, [sceneKey, syncSceneKey])
+
+  const isSameScene = !lastSceneKey || !sceneKey || lastSceneKey === sceneKey
+  const effectiveEditedDesignParams = useMemo(
+    () => (isSameScene ? editedDesignParams : {}),
+    [isSameScene, editedDesignParams],
+  )
+  const effectiveXrayHiddenIds = useMemo(
+    () => (isSameScene ? xrayHiddenNodeIds : []),
+    [isSameScene, xrayHiddenNodeIds],
+  )
+  const auditRecord = useMemo(() => {
+    if (effectiveXrayHiddenIds.length === 0) return record
+    let cloned: Record<string, SceneNodeLike> | null = null
+    for (const id of effectiveXrayHiddenIds) {
+      const n = record[id]
+      if (n && n.visible === false) {
+        if (!cloned) cloned = { ...record }
+        cloned[id] = { ...n, visible: true }
+      }
+    }
+    return cloned ?? record
+  }, [record, effectiveXrayHiddenIds])
   const designOverride = useMemo(
-    () => (Object.keys(editedDesignParams).length > 0 ? editedDesignParams : undefined),
-    [editedDesignParams],
+    () => (Object.keys(effectiveEditedDesignParams).length > 0 ? effectiveEditedDesignParams : undefined),
+    [effectiveEditedDesignParams],
   )
   const pack = useMemo(
-    () => generateStructuralSchedulePack(record, designOverride),
-    [record, designOverride],
+    () => generateStructuralSchedulePack(auditRecord, designOverride),
+    [auditRecord, designOverride],
   )
 
   const copyText = (label: string, content: string) => {

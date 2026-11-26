@@ -20,6 +20,7 @@ import {
   resolveNodeLevelId,
   shouldAdoptWallLessRoofLevel,
 } from '../irc/tables'
+import { useStructuralUi } from '../ui/store'
 import type { StructuralAssemblyNode } from './assembly'
 
 /**
@@ -31,6 +32,7 @@ import type { StructuralAssemblyNode } from './assembly'
 export function computeSkeletonFingerprint(
   assembly: SceneNodeLike,
   nodes: Readonly<Record<string, SceneNodeLike>>,
+  xrayHiddenIds?: ReadonlySet<string>,
 ): string {
   if (assembly.visible === false) return 'hidden'
   const parts: string[] = [
@@ -94,13 +96,17 @@ export function computeSkeletonFingerprint(
   for (const id of relevantIds) {
     const n = nodes[id]!
     const asset = n.asset as Record<string, unknown> | undefined
+    const effectiveVisible =
+      n.type === 'roof' || n.type === 'roof-segment'
+        ? true
+        : n.visible !== false
     parts.push(
       JSON.stringify([
         n.id,
         n.type,
         n.name,
         n.parentId,
-        n.visible,
+        effectiveVisible,
         n.level,
         n.start,
         n.end,
@@ -160,8 +166,17 @@ function disposeSkeletonGroup(group: Group): void {
 
 export function StructuralAssemblyRenderer({ node }: { node: StructuralAssemblyNode }) {
   const assembly = node as unknown as SceneNodeLike
+  const xrayHiddenNodeIds = useStructuralUi((s) => s.xrayHiddenNodeIds)
+  const xrayHiddenIds = useMemo(
+    () => (xrayHiddenNodeIds.length > 0 ? new Set(xrayHiddenNodeIds) : undefined),
+    [xrayHiddenNodeIds],
+  )
   const fingerprint = useScene((s) =>
-    computeSkeletonFingerprint(assembly, s.nodes as unknown as Readonly<Record<string, SceneNodeLike>>),
+    computeSkeletonFingerprint(
+      assembly,
+      s.nodes as unknown as Readonly<Record<string, SceneNodeLike>>,
+      xrayHiddenIds,
+    ),
   )
 
   const group = useMemo(() => {
@@ -170,8 +185,9 @@ export function StructuralAssemblyRenderer({ node }: { node: StructuralAssemblyN
     return buildBuildingSkeletonGroup({
       assembly,
       nodes: latestNodes,
+      xrayHiddenIds,
     })
-  }, [node.visible, fingerprint])
+  }, [node.visible, fingerprint, xrayHiddenIds])
 
   useEffect(() => {
     return () => {

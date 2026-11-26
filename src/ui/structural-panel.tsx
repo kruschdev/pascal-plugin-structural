@@ -22,11 +22,13 @@ import {
   type StructuralDesignParams,
   type StudSpacingIn,
   belongsToLevel,
+  isLowestWalledLevelInBuilding,
 } from '../irc/tables'
 import {
   type StructuralLayerKey,
   type StructuralScheduleTab,
   type UiStudSize,
+  computeSceneIdentityKey,
   useStructuralUi,
 } from './store'
 
@@ -164,6 +166,8 @@ export default function StructuralHostPanel() {
   const preferredColumnType = useStructuralUi((s) => s.preferredColumnType)
   const xrayActive = useStructuralUi((s) => s.xrayActive)
   const wallModeBeforeXray = useStructuralUi((s) => s.wallModeBeforeXray)
+  const xrayHiddenNodeIds = useStructuralUi((s) => s.xrayHiddenNodeIds)
+  const lastSceneKey = useStructuralUi((s) => s.lastSceneKey)
   const hiddenLayers = useStructuralUi((s) => s.hiddenLayers)
   const setSpecies = useStructuralUi((s) => s.setSpecies)
   const setStudSize = useStructuralUi((s) => s.setStudSize)
@@ -179,7 +183,25 @@ export default function StructuralHostPanel() {
   const setActiveTab = useStructuralUi((s) => s.setActiveTab)
   const setXrayActive = useStructuralUi((s) => s.setXrayActive)
   const setWallModeBeforeXray = useStructuralUi((s) => s.setWallModeBeforeXray)
+  const setXrayHiddenNodeIds = useStructuralUi((s) => s.setXrayHiddenNodeIds)
+  const syncSceneKey = useStructuralUi((s) => s.syncSceneKey)
   const toggleLayerVisibility = useStructuralUi((s) => s.toggleLayerVisibility)
+
+  const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
+  const sceneKey = useMemo(() => computeSceneIdentityKey(record), [record])
+  useEffect(() => {
+    if (sceneKey) syncSceneKey(sceneKey)
+  }, [sceneKey, syncSceneKey])
+
+  const isSameScene = !lastSceneKey || !sceneKey || lastSceneKey === sceneKey
+  const effectiveEditedDesignParams = useMemo(
+    () => (isSameScene ? editedDesignParams : {}),
+    [isSameScene, editedDesignParams],
+  )
+  const effectiveXrayHiddenIds = useMemo(
+    () => (isSameScene ? xrayHiddenNodeIds : []),
+    [isSameScene, xrayHiddenNodeIds],
+  )
 
   const isXrayActive = typeof viewerWallMode === 'string' ? viewerWallMode === 'down' : xrayActive
 
@@ -188,16 +210,53 @@ export default function StructuralHostPanel() {
       wallMode?: string
       setWallMode?: (mode: string) => void
     }
+    const latestRecord = useScene.getState().nodes as unknown as Readonly<Record<string, SceneNodeLike>>
     if (enable) {
       if (viewerState.setWallMode && viewerState.wallMode !== 'down') {
         setWallModeBeforeXray(viewerState.wallMode ?? 'up')
         viewerState.setWallMode('down')
+      }
+      // VIS-V3-08: Hide architectural roof/roof-segment/ceiling shells so roof framing skeleton is clearly visible
+      const newlyHiddenIds: string[] = []
+      const updates: Array<{ id: string; data: Record<string, unknown> }> = []
+      for (const n of Object.values(latestRecord)) {
+        if ((n.type === 'roof' || n.type === 'roof-segment' || n.type === 'ceiling') && n.visible !== false) {
+          newlyHiddenIds.push(n.id)
+          updates.push({ id: n.id, data: { visible: false } })
+        }
+      }
+      const prevIds = useStructuralUi.getState().xrayHiddenNodeIds.filter((id) => id in latestRecord)
+      const mergedIds = Array.from(new Set([...prevIds, ...newlyHiddenIds]))
+      // Register hidden IDs BEFORE mutating scene visibility so StructuralAssemblyRenderer preserves roof framing
+      setXrayHiddenNodeIds(mergedIds)
+      if (updates.length > 0) {
+        runAsSingleSceneHistoryStep(useScene, () => {
+          updateNodes(updates as never)
+        })
       }
       setXrayActive(true)
     } else {
       if (viewerState.setWallMode && viewerState.wallMode === 'down') {
         viewerState.setWallMode(wallModeBeforeXray && wallModeBeforeXray !== 'down' ? wallModeBeforeXray : 'up')
       }
+      const trackedRestoreIds = useStructuralUi.getState().xrayHiddenNodeIds.filter((id) => id in latestRecord)
+      const restoreIds =
+        trackedRestoreIds.length > 0
+          ? trackedRestoreIds
+          : Object.values(latestRecord)
+              .filter(
+                (n) =>
+                  (n.type === 'roof' || n.type === 'roof-segment' || n.type === 'ceiling') &&
+                  n.visible === false,
+              )
+              .map((n) => n.id)
+      if (restoreIds.length > 0) {
+        const restoreUpdates = restoreIds.map((id) => ({ id, data: { visible: true } }))
+        runAsSingleSceneHistoryStep(useScene, () => {
+          updateNodes(restoreUpdates as never)
+        })
+      }
+      setXrayHiddenNodeIds([])
       setXrayActive(false)
     }
   }
@@ -232,12 +291,23 @@ export default function StructuralHostPanel() {
     }
   }
 
-  const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
   const levelId = activeLevelOf(nodes, selectedLevelId)
   const designOverride = useMemo(
-    () => (Object.keys(editedDesignParams).length > 0 ? editedDesignParams : undefined),
-    [editedDesignParams],
+    () => (Object.keys(effectiveEditedDesignParams).length > 0 ? effectiveEditedDesignParams : undefined),
+    [effectiveEditedDesignParams],
   )
+  const auditRecord = useMemo(() => {
+    if (effectiveXrayHiddenIds.length === 0) return record
+    let cloned: Record<string, SceneNodeLike> | null = null
+    for (const id of effectiveXrayHiddenIds) {
+      const n = record[id]
+      if (n && n.visible === false) {
+        if (!cloned) cloned = { ...record }
+        cloned[id] = { ...n, visible: true }
+      }
+    }
+    return cloned ?? record
+  }, [record, effectiveXrayHiddenIds])
   const autoFrameDesign = useMemo(() => {
     const firstAssembly = Object.values(record).find((n) => n.type === 'structural:assembly')
     const persisted = (firstAssembly?.designParams as Partial<StructuralDesignParams> | undefined) ?? {}
@@ -251,7 +321,7 @@ export default function StructuralHostPanel() {
       frostDepthIn,
       soilBearingPsf,
       ...persisted,
-      ...editedDesignParams,
+      ...effectiveEditedDesignParams,
     }
   }, [
     record,
@@ -263,9 +333,9 @@ export default function StructuralHostPanel() {
     seismicCategory,
     frostDepthIn,
     soilBearingPsf,
-    editedDesignParams,
+    effectiveEditedDesignParams,
   ])
-  const audit = useMemo(() => auditStructuralScene(record, designOverride), [record, designOverride])
+  const audit = useMemo(() => auditStructuralScene(auditRecord, designOverride), [auditRecord, designOverride])
 
   const counts = useMemo(() => {
     let beams = 0
@@ -306,7 +376,7 @@ export default function StructuralHostPanel() {
       setStatusMsg('Create a building level first before auto-framing.')
       return
     }
-    const outcome = structuralAgentOperations.structural_autopopulate_irc(record, {
+    const outcome = structuralAgentOperations.structural_autopopulate_irc(auditRecord, {
       levelId,
       studSize: studSize === 'auto' ? undefined : studSize,
       studSpacingIn,
@@ -314,8 +384,7 @@ export default function StructuralHostPanel() {
       roofSystem,
       preferredBeamFamily,
       preferredColumnType,
-      includeRoof: true,
-      includeFoundation: true,
+      includeFoundation: isLowestWalledLevelInBuilding(auditRecord, levelId),
       includeFireblocking: true,
       design: autoFrameDesign,
     })

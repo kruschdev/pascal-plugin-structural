@@ -24,9 +24,10 @@ import {
   findLevelCommercialRtus,
   getConnectorBySku,
   isHighestWalledLevelInBuilding,
-  levelSortOrder,
+  isLowestWalledLevelInBuilding,
   resolveNodeLevelId,
   sameLevelOrUnscoped,
+  shouldAdoptRoofSegmentOntoLevel,
 } from './tables'
 
 export type AuditSeverity = 'error' | 'warning' | 'info'
@@ -535,6 +536,22 @@ export function auditStructuralScene(
     ((s?.[1] ?? 0) + (e?.[1] ?? 0)) / 2,
   ]
 
+  const pointToSegmentDist2D = (
+    px: number,
+    pz: number,
+    ax: number,
+    az: number,
+    bx: number,
+    bz: number,
+  ): number => {
+    const dx = bx - ax
+    const dz = bz - az
+    const lenSq = dx * dx + dz * dz
+    if (lenSq < 1e-10) return Math.hypot(px - ax, pz - az)
+    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / lenSq))
+    return Math.hypot(px - (ax + t * dx), pz - (az + t * dz))
+  }
+
   for (const { lvlId, scopeNodes } of auditPasses) {
     const lvlAsm = lvlId
       ? assemblies.find((a) => resolveNodeLevelId(nodes, a) === lvlId)
@@ -595,12 +612,19 @@ export function auditStructuralScene(
         const elevDiff = Math.abs((typeof fs.elevationY === 'number' ? fs.elevationY : req.elevationY) - req.elevationY)
         if (elevDiff > 0.75) return false
         if (req.hostWallId && fs.hostWallId) return fs.hostWallId === req.hostWallId
-        const fsMid = midOf(fs.start as Vec2 | undefined, fs.end as Vec2 | undefined)
-        const distPlan = Math.hypot(fsMid[0] - reqMid[0], fsMid[1] - reqMid[1])
+        const fsStart = (fs.start as Vec2 | undefined) ?? [0, 0]
+        const fsEnd = (fs.end as Vec2 | undefined) ?? fsStart
+        const distToSeg = pointToSegmentDist2D(reqMid[0], reqMid[1], fsStart[0], fsStart[1], fsEnd[0], fsEnd[1])
         if (req.penetratingNodeId && fs.penetratingNodeId) {
-          return fs.penetratingNodeId === req.penetratingNodeId && distPlan <= 1.25
+          return fs.penetratingNodeId === req.penetratingNodeId && distToSeg <= 1.25
         }
-        return distPlan <= 1.25
+        if (distToSeg <= 1.25) return true
+        // Same-level, same-kind, same-elevation firestop explicitly labeled for the exact room/zone/slab
+        // tolerates modest polygon-edge drift (<= 3.0 m) after scene edits or DB round-trips.
+        if (typeof fs.name === 'string' && fs.name === req.label && distToSeg <= 3.0) {
+          return true
+        }
+        return false
       })
       if (!matched) {
         push({
@@ -737,20 +761,22 @@ export function auditStructuralScene(
     baseY: number,
   ): AuditRoofSeg[] => {
     const segs: AuditRoofSeg[] = []
-    const targetLevelNode = targetLvlId ? nodes[targetLvlId] : undefined
-    const targetBuildingId = typeof targetLevelNode?.parentId === 'string' ? targetLevelNode.parentId : null
-    const targetOrder = targetLevelNode?.type === 'level' ? levelSortOrder(targetLevelNode) : 0
+    const isUpperLevel = !isLowestWalledLevelInBuilding(nodes, targetLvlId)
 
     for (const node of all) {
-      if (node.type !== 'roof-segment' || node.visible === false) continue
+      if (node.type !== 'roof-segment') continue
       const segPos = Array.isArray(node.position) ? (node.position as number[]) : [0, 0, 0]
       let px = typeof segPos[0] === 'number' ? segPos[0] : 0
       let py = typeof segPos[1] === 'number' ? segPos[1] : 0
       let pz = typeof segPos[2] === 'number' ? segPos[2] : 0
       let yaw = typeof node.rotation === 'number' ? node.rotation : 0
 
+      const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
+      const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
+
       let curParentId = typeof node.parentId === 'string' ? node.parentId : null
       let belongsHere = !targetLvlId
+      let wasAdoptedFromWallLessLevel = false
       for (let hop = 0; hop < 6 && curParentId; hop++) {
         if (!targetLvlId || curParentId === targetLvlId) {
           belongsHere = true
@@ -759,14 +785,12 @@ export function auditStructuralScene(
         const parent = nodes[curParentId]
         if (!parent) break
         if (parent.type === 'level') {
-          const pBuildingId = typeof parent.parentId === 'string' ? parent.parentId : null
-          const sameBldg = !targetBuildingId || !pBuildingId || targetBuildingId === pBuildingId
-          const parentHasWalls = all.some(
-            (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, parent.id),
-          )
-          if (sameBldg && !parentHasWalls && levelSortOrder(parent) >= targetOrder && isHighestWalledLevelInBuilding(nodes, targetLvlId)) {
-            belongsHere = true
-          }
+          const absCos = Math.abs(Math.cos(yaw))
+          const absSin = Math.abs(Math.sin(yaw))
+          const halfX = (widthM * absCos + depthM * absSin) / 2
+          const halfZ = (widthM * absSin + depthM * absCos) / 2
+          belongsHere = shouldAdoptRoofSegmentOntoLevel(nodes, targetLvlId, parent, px, pz, halfX, halfZ)
+          wasAdoptedFromWallLessLevel = belongsHere
           break
         }
         if (parent.type === 'roof') {
@@ -785,8 +809,6 @@ export function auditStructuralScene(
       }
       if (!belongsHere) continue
 
-      const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
-      const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
       const rawPitch = typeof node.pitch === 'number' && Number.isFinite(node.pitch) ? node.pitch : 26.57
       const pitchRad =
         rawPitch <= 0
@@ -796,7 +818,12 @@ export function auditStructuralScene(
             : Math.min((65 * Math.PI) / 180, rawPitch)
       const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
       const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
-      const cy = py > 0.05 ? py + segWallH : baseY + wallH + segWallH
+      const cy =
+        py > 0.05
+          ? py + segWallH
+          : !wasAdoptedFromWallLessLevel && isUpperLevel
+            ? baseY + segWallH
+            : baseY + wallH + segWallH
       segs.push({
         cx: px,
         cy,
@@ -828,20 +855,56 @@ export function auditStructuralScene(
     if (roofSegs.length > 0) {
       let bestY: number | null = null
       for (const seg of roofSegs) {
-        const cosR = Math.cos(seg.yaw)
-        const sinR = Math.sin(seg.yaw)
+        const swapAxes =
+          (seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard') &&
+          seg.widthM < seg.depthM
+        const effYaw = swapAxes ? seg.yaw + Math.PI / 2 : seg.yaw
+        const effW = swapAxes ? seg.depthM : seg.widthM
+        const effD = swapAxes ? seg.widthM : seg.depthM
+        const cosR = Math.cos(effYaw)
+        const sinR = Math.sin(effYaw)
         const dx = x - seg.cx
         const dz = z - seg.cz
         const lx = dx * cosR - dz * sinR
         const lz = dx * sinR + dz * cosR
-        if (Math.abs(lx) > seg.widthM / 2 + 0.15 || Math.abs(lz) > seg.depthM / 2 + seg.overhangM + 0.15) {
-          continue
-        }
         const slopeTan = Math.tan(seg.pitchRad)
-        const sy =
-          seg.roofType === 'shed'
-            ? seg.cy + Math.max(0, seg.depthM / 2 - lz) * slopeTan
-            : seg.cy + Math.max(0, seg.depthM / 2 - Math.abs(lz)) * slopeTan
+
+        let sy: number
+        if (seg.roofType === 'conical') {
+          const r = Math.min(seg.widthM, seg.depthM) / 2
+          const dist = Math.hypot(lx, lz)
+          if (dist > r + seg.overhangM + 0.15) continue
+          sy = seg.cy + Math.max(0, r - dist) * slopeTan
+        } else {
+          const padX =
+            seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard'
+              ? seg.overhangM + 0.15
+              : 0.15
+          if (Math.abs(lx) > effW / 2 + padX || Math.abs(lz) > effD / 2 + seg.overhangM + 0.15) {
+            continue
+          }
+          if (seg.roofType === 'flat' || seg.pitchRad <= 1e-4) {
+            sy = seg.cy
+          } else if (seg.roofType === 'shed') {
+            sy = seg.cy + Math.max(0, effD / 2 - lz) * slopeTan
+          } else if (seg.roofType === 'hip' || seg.roofType === 'dutch') {
+            const halfW = effW / 2
+            const halfD = effD / 2
+            const riseM = seg.roofType === 'dutch' ? Math.min(halfD * slopeTan, halfD * 1.35) : halfD * slopeTan
+            const effTan = riseM / Math.max(0.1, halfD)
+            const dMin = Math.min(halfW - Math.abs(lx), halfD - Math.abs(lz))
+            sy = seg.cy + Math.min(riseM, Math.max(0, dMin) * effTan)
+          } else if (seg.roofType === 'mansard') {
+            const halfW = effW / 2
+            const halfD = effD / 2
+            const inset = Math.min(effW, effD) * 0.18
+            const riseM = Math.min(2.2, Math.max(0.25, inset * slopeTan))
+            const dMin = Math.min(halfW - Math.abs(lx), halfD - Math.abs(lz))
+            sy = seg.cy + Math.min(riseM, Math.max(0, dMin) * (riseM / Math.max(0.1, inset)))
+          } else {
+            sy = seg.cy + Math.max(0, effD / 2 - Math.abs(lz)) * slopeTan
+          }
+        }
         if (bestY === null || sy > bestY) bestY = sy
       }
       if (bestY !== null) return bestY
@@ -900,7 +963,9 @@ export function auditStructuralScene(
       typeof lvlAsm?.roofPitchRise === 'number' && Number.isFinite(lvlAsm.roofPitchRise)
         ? lvlAsm.roofPitchRise
         : 6
-    const levelRoofSegs = isTopWalledLevel ? extractAuditRoofSegsForLevel(lvlId, wallH, baseY) : []
+    const levelRoofSegs = isTopWalledLevel
+      ? extractAuditRoofSegsForLevel(lvlId, wallH, baseY).filter((seg) => seg.cy >= baseY + wallH - 0.6)
+      : []
     const hasCommercialRtu = findLevelCommercialRtus(nodes, lvlId).length > 0
     const isFlatCommercialRoof = hasCommercialRtu && levelRoofSegs.length === 0
 

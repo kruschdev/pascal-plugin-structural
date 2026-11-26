@@ -9,7 +9,7 @@
 
 import { deriveRequiredFirestops } from './fireblocking'
 import { evaluateBracedWallLines } from './load-path'
-import { clusterLevelFootprints, extractWallOpenings } from './openings'
+import { clusterLevelFootprints, extractWallOpenings, resolveWallHeightM } from './openings'
 import {
   selectBeamHangerSku,
   selectHurricaneTieSku,
@@ -225,8 +225,14 @@ export function autopopulateStructuralScene(
     (sum, c) => sum + (Math.max(10, c.widthM * METERS_TO_FEET) + Math.max(10, c.depthM * METERS_TO_FEET)) * 2,
     0,
   )
+  const hostLevelNode = levelId ? nodes[levelId] : undefined
+  const levelFallbackWallH =
+    typeof hostLevelNode?.height === 'number' && Number.isFinite(hostLevelNode.height) && hostLevelNode.height > 1.2
+      ? hostLevelNode.height
+      : 2.7432
   const defaultWallHeightM =
-    walls.reduce((maxH, w) => Math.max(maxH, typeof w.height === 'number' ? w.height : 2.7432), 0) || 2.7432
+    walls.reduce((maxH, w) => Math.max(maxH, resolveWallHeightM(nodes, w, levelFallbackWallH)), 0) ||
+    levelFallbackWallH
 
   // Evaluate braced wall lines scoped to this level so multi-storey runs never duplicate hold-downs
   const bwlReports = evaluateBracedWallLines({ nodes, design, levelId })
@@ -381,7 +387,7 @@ export function autopopulateStructuralScene(
     const ux = (we[0] - ws[0]) / lenM
     const uz = (we[1] - ws[1]) / lenM
     const yaw = Math.atan2(-(we[1] - ws[1]), we[0] - ws[0])
-    const wallH = typeof hostWall.height === 'number' && hostWall.height > 1.2 ? hostWall.height : defaultWallHeightM
+    const wallH = resolveWallHeightM(nodes, hostWall, defaultWallHeightM)
     const wallBaseY = typeof hostWall.elevation === 'number' && Number.isFinite(hostWall.elevation) ? hostWall.elevation : 0
     const wallOpenings = extractWallOpenings(nodes, hostWall)
 
