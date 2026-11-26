@@ -9,7 +9,7 @@
 
 import { deriveRequiredFirestops } from './fireblocking'
 import { evaluateBracedWallLines } from './load-path'
-import { extractWallOpenings } from './openings'
+import { clusterLevelFootprints, extractWallOpenings } from './openings'
 import {
   selectBeamHangerSku,
   selectHurricaneTieSku,
@@ -127,25 +127,18 @@ export function autopopulateStructuralScene(
     return candidate
   }
 
-  // Determine overall footprint bounds (from slabs or walls)
+  // Partition level into transitively connected building footprint clusters so detached
+  // buildings on the same level never bridge empty yard with girders, columns, or ridge beams
+  const footprintClusters = clusterLevelFootprints(nodes, levelId, 0.35)
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
   let minZ = Number.POSITIVE_INFINITY
   let maxZ = Number.NEGATIVE_INFINITY
-  for (const s of slabs) {
-    const b = polyBounds(s.polygon!)
-    minX = Math.min(minX, b.minX)
-    maxX = Math.max(maxX, b.maxX)
-    minZ = Math.min(minZ, b.minZ)
-    maxZ = Math.max(maxZ, b.maxZ)
-  }
-  if (!Number.isFinite(minX)) {
-    for (const w of walls) {
-      minX = Math.min(minX, w.start![0], w.end![0])
-      maxX = Math.max(maxX, w.start![0], w.end![0])
-      minZ = Math.min(minZ, w.start![1], w.end![1])
-      maxZ = Math.max(maxZ, w.start![1], w.end![1])
-    }
+  for (const c of footprintClusters) {
+    minX = Math.min(minX, c.minX)
+    maxX = Math.max(maxX, c.maxX)
+    minZ = Math.min(minZ, c.minZ)
+    maxZ = Math.max(maxZ, c.maxZ)
   }
   if (!Number.isFinite(minX)) {
     minX = 0
@@ -153,10 +146,18 @@ export function autopopulateStructuralScene(
     minZ = 0
     maxZ = 7.315
   }
-  const footprintWidthFt = Math.max(10, (maxX - minX) * METERS_TO_FEET)
-  const footprintDepthFt = Math.max(10, (maxZ - minZ) * METERS_TO_FEET)
+  const primaryCluster = footprintClusters.reduce(
+    (best, c) => (c.widthM * c.depthM > best.widthM * best.depthM ? c : best),
+    footprintClusters[0] ?? { minX, maxX, minZ, maxZ, widthM: maxX - minX, depthM: maxZ - minZ, avgWallHeightM: 2.7432 },
+  )
+  const footprintWidthFt = Math.max(10, primaryCluster.widthM * METERS_TO_FEET)
+  const footprintDepthFt = Math.max(10, primaryCluster.depthM * METERS_TO_FEET)
   const shortSpanFt = Math.min(footprintWidthFt, footprintDepthFt)
   const longSpanFt = Math.max(footprintWidthFt, footprintDepthFt)
+  const totalPerimFt = footprintClusters.reduce(
+    (sum, c) => sum + (Math.max(10, c.widthM * METERS_TO_FEET) + Math.max(10, c.depthM * METERS_TO_FEET)) * 2,
+    0,
+  )
   const defaultWallHeightM =
     walls.reduce((maxH, w) => Math.max(maxH, typeof w.height === 'number' ? w.height : 2.7432), 0) || 2.7432
 
@@ -191,13 +192,17 @@ export function autopopulateStructuralScene(
       return midX >= zb.minX - 0.3 && midX <= zb.maxX + 0.3 && midZ >= zb.minZ - 0.3 && midZ <= zb.maxZ + 0.3
     })
 
+    const hostCluster =
+      footprintClusters.find(
+        (c) => midX >= c.minX - 0.35 && midX <= c.maxX + 0.35 && midZ >= c.minZ - 0.35 && midZ <= c.maxZ + 0.35,
+      ) ?? primaryCluster
     const isExterior =
       wall.frontSide === 'exterior' ||
       wall.backSide === 'exterior' ||
-      Math.abs(midX - minX) < 0.3 ||
-      Math.abs(midX - maxX) < 0.3 ||
-      Math.abs(midZ - minZ) < 0.3 ||
-      Math.abs(midZ - maxZ) < 0.3
+      Math.abs(midX - hostCluster.minX) < 0.3 ||
+      Math.abs(midX - hostCluster.maxX) < 0.3 ||
+      Math.abs(midZ - hostCluster.minZ) < 0.3 ||
+      Math.abs(midZ - hostCluster.maxZ) < 0.3
     const isShear = shearWallIds.has(wall.id)
     const isWet = nearPlumbing || inWetZone
     const studSize: StudSize = options.studSize ?? (isExterior || isWet || thick >= 0.13 ? '2x6' : '2x4')
@@ -384,30 +389,47 @@ export function autopopulateStructuralScene(
     }
   }
 
-  // 5. Floor Girders + Stacked Columns + Post Caps + Post Bases + Joist Hangers
-  if (floorSizing.girderLinesNeeded > 0 && floorSizing.recommendedGirder) {
-    const runsAlongX = maxX - minX >= maxZ - minZ
-    for (let g = 1; g <= floorSizing.girderLinesNeeded; g++) {
-      const frac = g / (floorSizing.girderLinesNeeded + 1)
+  // 5. Floor Girders + Stacked Columns + Post Caps + Post Bases + Joist Hangers (per connected cluster!)
+  let girderSeq = 0
+  for (const cluster of footprintClusters) {
+    const cWidthFt = Math.max(6, cluster.widthM * METERS_TO_FEET)
+    const cDepthFt = Math.max(6, cluster.depthM * METERS_TO_FEET)
+    const cShortFt = Math.min(cWidthFt, cDepthFt)
+    const cLongFt = Math.max(cWidthFt, cDepthFt)
+    const cFloorSizing = sizeFloorSystem({
+      clearSpanFt: cShortFt,
+      crossLengthFt: cLongFt,
+      system: floorSystem,
+      species: design.species,
+      spacingIn: studSpacingIn,
+      liveLoadPsf: design.floorLiveLoadPsf,
+      deadLoadPsf: design.floorDeadLoadPsf,
+    })
+    if (cFloorSizing.girderLinesNeeded <= 0 || !cFloorSizing.recommendedGirder) continue
+
+    const runsAlongX = cluster.maxX - cluster.minX >= cluster.maxZ - cluster.minZ
+    for (let g = 1; g <= cFloorSizing.girderLinesNeeded; g++) {
+      girderSeq += 1
+      const frac = g / (cFloorSizing.girderLinesNeeded + 1)
       const gStart: Vec2 = runsAlongX
-        ? [minX, minZ + (maxZ - minZ) * frac]
-        : [minX + (maxX - minX) * frac, minZ]
+        ? [cluster.minX, cluster.minZ + (cluster.maxZ - cluster.minZ) * frac]
+        : [cluster.minX + (cluster.maxX - cluster.minX) * frac, cluster.minZ]
       const gEnd: Vec2 = runsAlongX
-        ? [maxX, minZ + (maxZ - minZ) * frac]
-        : [minX + (maxX - minX) * frac, maxZ]
+        ? [cluster.maxX, cluster.minZ + (cluster.maxZ - cluster.minZ) * frac]
+        : [cluster.minX + (cluster.maxX - cluster.minX) * frac, cluster.maxZ]
       const girderLenFt = Math.hypot(gEnd[0] - gStart[0], gEnd[1] - gStart[1]) * METERS_TO_FEET
       // Break long floor girders into clear-span bays <= 12 ft supported by intermediate columns
       const postBays = Math.max(1, Math.ceil(girderLenFt / 12))
       const baySpanFt = girderLenFt / postBays
       const girderCheck = sizeBeamOrHeader({
         spanFt: baySpanFt,
-        tributaryWidthFt: floorSizing.effectiveSpanFt,
+        tributaryWidthFt: cFloorSizing.effectiveSpanFt,
         role: 'floor-girder',
         liveLoadPsf: design.floorLiveLoadPsf,
         deadLoadPsf: design.floorDeadLoadPsf,
         snowLoadPsf: 0,
         species: design.species,
-        preferredFamily: options.preferredBeamFamily ?? floorSizing.recommendedGirder.entry.family,
+        preferredFamily: options.preferredBeamFamily ?? cFloorSizing.recommendedGirder.entry.family,
       })
       const girderY = -((girderCheck.entry.depthIn * INCHES_TO_METERS) / 2)
       let firstGirderId = ''
@@ -427,8 +449,8 @@ export function autopopulateStructuralScene(
           type: 'structural:beam',
           name:
             postBays > 1
-              ? `Floor Girder #${g}-${b + 1} (${girderCheck.entry.designation})`
-              : `Floor Girder #${g} (${girderCheck.entry.designation})`,
+              ? `Floor Girder #${girderSeq}-${b + 1} (${girderCheck.entry.designation})`
+              : `Floor Girder #${girderSeq} (${girderCheck.entry.designation})`,
           parentId: levelId,
           start: bStart,
           end: bEnd,
@@ -441,7 +463,7 @@ export function autopopulateStructuralScene(
           depthIn: girderCheck.entry.depthIn,
           species: design.species,
           mountStyle: 'flush',
-          tributaryWidthFt: floorSizing.effectiveSpanFt,
+          tributaryWidthFt: cFloorSizing.effectiveSpanFt,
           liveLoadPsf: design.floorLiveLoadPsf,
           deadLoadPsf: design.floorDeadLoadPsf,
           snowLoadPsf: 0,
@@ -451,28 +473,29 @@ export function autopopulateStructuralScene(
         })
       }
 
-      // Batch joist hangers on both sides of the flush girder
-      const joistsPerSide = Math.max(2, Math.floor((girderLenFt * 12) / floorSizing.spacingIn))
+      // Batch joist hangers on both sides of the flush girder (attached to all bay girder segments)
+      const joistsPerSide = Math.max(2, Math.floor((girderLenFt * 12) / cFloorSizing.spacingIn))
       emitConnector({
-        sku: floorSizing.joistHangerSku,
+        sku: cFloorSizing.joistHangerSku,
         position: [(gStart[0] + gEnd[0]) / 2, girderY, (gStart[1] + gEnd[1]) / 2],
         quantity: joistsPerSide * 2,
-        attachedNodeIds: [firstGirderId, assemblyId],
-        name: `${floorSizing.joistHangerSku} Joist Hangers (x${joistsPerSide * 2} along Girder #${g})`,
+        attachedNodeIds: [...bayGirderIds, assemblyId],
+        name: `${cFloorSizing.joistHangerSku} Joist Hangers (x${joistsPerSide * 2} along Girder #${girderSeq})`,
       })
 
-      // Heavy beam hangers at girder pocket ends
+      // Heavy beam hangers at girder pocket ends (attached to first and last bay girder)
       const beamHangerSku = selectBeamHangerSku(girderCheck.entry, girderCheck.shearLbs)
+      const lastGirderId = bayGirderIds[bayGirderIds.length - 1] ?? firstGirderId
       emitConnector({
         sku: beamHangerSku,
         position: [gStart[0], girderY, gStart[1]],
         quantity: 2,
-        attachedNodeIds: [firstGirderId],
+        attachedNodeIds: lastGirderId !== firstGirderId ? [firstGirderId, lastGirderId] : [firstGirderId],
         name: `${beamHangerSku} Girder End Hangers (x2)`,
       })
 
       // Intermediate support columns + post caps + post bases + spread footings at each bay split
-      const colHeightFt = defaultWallHeightM * METERS_TO_FEET
+      const colHeightFt = cluster.avgWallHeightM * METERS_TO_FEET
       const colAxialLbs = Math.round(girderCheck.uniformLoadPlf * baySpanFt)
       const colSizing = sizeColumnAndFooting({
         axialLoadLbs: colAxialLbs,
@@ -494,8 +517,8 @@ export function autopopulateStructuralScene(
           type: 'structural:column',
           name: `Girder Post #${p} (${colSizing.entry.designation})`,
           parentId: levelId,
-          position: [Number(px.toFixed(3)), -defaultWallHeightM, Number(pz.toFixed(3))],
-          heightM: Number(Math.max(0.8, defaultWallHeightM - girderCheck.entry.depthIn * INCHES_TO_METERS).toFixed(3)),
+          position: [Number(px.toFixed(3)), -cluster.avgWallHeightM, Number(pz.toFixed(3))],
+          heightM: Number(Math.max(0.8, cluster.avgWallHeightM - girderCheck.entry.depthIn * INCHES_TO_METERS).toFixed(3)),
           columnType: colSizing.entry.columnType,
           designation: colSizing.entry.designation,
           widthIn: colSizing.entry.widthIn,
@@ -520,7 +543,7 @@ export function autopopulateStructuralScene(
         if (includeFoundation) {
           emitConnector({
             sku: colSizing.recommendedBaseSku,
-            position: [px, -defaultWallHeightM, pz],
+            position: [px, -cluster.avgWallHeightM, pz],
             attachedNodeIds: [colId],
             name: `${colSizing.recommendedBaseSku} Standoff Post Base`,
           })
@@ -529,14 +552,28 @@ export function autopopulateStructuralScene(
     }
   }
 
-  // 6. Roof Structural Ridge Beam (if cathedral or pitch < 3:12) + Hurricane Ties & Gable Angles
+  // 6. Roof Structural Ridge Beam (if cathedral or pitch < 3:12, per connected cluster!) + Hurricane Ties & Gable Angles
   if (includeRoof) {
-    if (roofSizing.needsStructuralRidgeBeam && roofSizing.recommendedRidgeBeam) {
-      const rb = roofSizing.recommendedRidgeBeam
-      const runsAlongX = maxX - minX >= maxZ - minZ
-      const rStart: Vec2 = runsAlongX ? [minX, (minZ + maxZ) / 2] : [(minX + maxX) / 2, minZ]
-      const rEnd: Vec2 = runsAlongX ? [maxX, (minZ + maxZ) / 2] : [(minX + maxX) / 2, maxZ]
-      const ridgeY = defaultWallHeightM + (shortSpanFt / 2) * (roofPitchRise / 12) * FEET_TO_METERS
+    for (const cluster of footprintClusters) {
+      const cShortFt = Math.max(6, Math.min(cluster.widthM, cluster.depthM) * METERS_TO_FEET)
+      const cLongFt = Math.max(6, Math.max(cluster.widthM, cluster.depthM) * METERS_TO_FEET)
+      const cRoofSizing = sizeRoofSystem({
+        buildingSpanFt: cShortFt,
+        ridgeLengthFt: cLongFt,
+        pitchRiseOver12: roofPitchRise,
+        system: roofSystem,
+        design,
+      })
+      if (!cRoofSizing.needsStructuralRidgeBeam || !cRoofSizing.recommendedRidgeBeam) continue
+      const rb = cRoofSizing.recommendedRidgeBeam
+      const runsAlongX = cluster.maxX - cluster.minX >= cluster.maxZ - cluster.minZ
+      const rStart: Vec2 = runsAlongX
+        ? [cluster.minX, (cluster.minZ + cluster.maxZ) / 2]
+        : [(cluster.minX + cluster.maxX) / 2, cluster.minZ]
+      const rEnd: Vec2 = runsAlongX
+        ? [cluster.maxX, (cluster.minZ + cluster.maxZ) / 2]
+        : [(cluster.minX + cluster.maxX) / 2, cluster.maxZ]
+      const ridgeY = cluster.avgWallHeightM + (cShortFt / 2) * (roofPitchRise / 12) * FEET_TO_METERS
       const ridgeId = nextId('strbm')
 
       createdNodes.push({
@@ -555,7 +592,7 @@ export function autopopulateStructuralScene(
         depthIn: rb.entry.depthIn,
         species: design.species,
         mountStyle: 'flush',
-        tributaryWidthFt: Number((shortSpanFt / 2).toFixed(1)),
+        tributaryWidthFt: Number((cShortFt / 2).toFixed(1)),
         liveLoadPsf: design.roofLiveLoadPsf,
         deadLoadPsf: design.roofDeadLoadPsf,
         snowLoadPsf: design.groundSnowPsf,
@@ -586,22 +623,24 @@ export function autopopulateStructuralScene(
           depthIn: postSizing.entry.depthIn,
           axialLoadLbs: rb.shearLbs,
           transfersFromNodeId: ridgeId,
-          transfersToNodeId: `footing:${colId}`,
+          transfersToNodeId: includeFoundation ? `footing:${colId}` : undefined,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
-          footingWidthIn: postSizing.footingWidthIn,
-          footingDepthIn: postSizing.footingDepthIn,
-          footingRebar: postSizing.footingRebar,
+          footingWidthIn: includeFoundation ? postSizing.footingWidthIn : 0,
+          footingDepthIn: includeFoundation ? postSizing.footingDepthIn : 0,
+          footingRebar: includeFoundation ? postSizing.footingRebar : 'Transfers to lower story',
         })
         emitConnector({
           sku: postSizing.recommendedCapSku,
           position: [pt[0], ridgeY - 0.15, pt[1]],
           attachedNodeIds: [colId, ridgeId],
         })
-        emitConnector({
-          sku: postSizing.recommendedBaseSku,
-          position: [pt[0], 0, pt[1]],
-          attachedNodeIds: [colId],
-        })
+        if (includeFoundation) {
+          emitConnector({
+            sku: postSizing.recommendedBaseSku,
+            position: [pt[0], 0, pt[1]],
+            attachedNodeIds: [colId],
+          })
+        }
       }
     }
 
@@ -675,7 +714,7 @@ export function autopopulateStructuralScene(
   }
 
   if (includeFoundation && (highSeismic || design.seismicCategory === 'C')) {
-    const perimFt = (footprintWidthFt + footprintDepthFt) * 2
+    const perimFt = totalPerimFt > 0 ? totalPerimFt : (footprintWidthFt + footprintDepthFt) * 2
     const boltSpacingFt = design.storiesAbove >= 2 || highSeismic ? 4 : 6
     const boltQty = Math.max(8, Math.ceil(perimFt / boltSpacingFt) + 4)
     emitConnector({

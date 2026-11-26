@@ -6,7 +6,7 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
-import type { SceneNodeLike, Vec2 } from './tables'
+import { type SceneNodeLike, type Vec2, belongsToLevel } from './tables'
 
 export type ExtractedWallOpening = {
   id: string
@@ -25,22 +25,18 @@ export type ExtractedWallOpening = {
   headYM: number
 }
 
-export function belongsToStructuralLevel(
-  nodes: Readonly<Record<string, SceneNodeLike>>,
-  node: SceneNodeLike,
-  levelId: string | null,
-): boolean {
-  if (!levelId) return true
-  if (node.id === levelId || node.parentId === levelId) return true
-  let cur: SceneNodeLike | undefined = node
-  let guard = 0
-  while (cur?.parentId && guard < 12) {
-    if (cur.parentId === levelId) return true
-    cur = nodes[cur.parentId]
-    guard += 1
-  }
-  return false
+export type FootprintCluster = {
+  minX: number
+  maxX: number
+  minZ: number
+  maxZ: number
+  widthM: number
+  depthM: number
+  avgWallHeightM: number
 }
+
+/** Backwards-compatible alias for canonical `belongsToLevel` from `./tables`. */
+export const belongsToStructuralLevel = belongsToLevel
 
 export function classifyOpeningKind(node: SceneNodeLike): 'door' | 'window' | null {
   if (node.type === 'door') return 'door'
@@ -84,6 +80,7 @@ export function extractWallOpenings(
 
   const out: ExtractedWallOpening[] = []
   for (const o of candidates) {
+    if (o.visible === false) continue
     const kind = classifyOpeningKind(o)
     if (!kind) continue
 
@@ -121,8 +118,10 @@ export function extractWallOpenings(
       const pz = typeof pos[2] === 'number' && Number.isFinite(pos[2]) ? pos[2] : 0
       if (Math.abs(pz) < 0.45 && px >= -0.25 && px <= wallLenM + 0.25) {
         uCenterM = px
-        if (o.type === 'item' && assetOffset && typeof assetOffset[0] === 'number') {
-          uCenterM += assetOffset[0] * Math.cos(itemRotY)
+        if (o.type === 'item' && assetOffset) {
+          const ox = typeof assetOffset[0] === 'number' && Number.isFinite(assetOffset[0]) ? assetOffset[0] : 0
+          const oz = typeof assetOffset[2] === 'number' && Number.isFinite(assetOffset[2]) ? assetOffset[2] : 0
+          uCenterM += ox * Math.cos(itemRotY) + oz * Math.sin(itemRotY)
         }
       } else {
         const ux = (ex - sx) / wallLenM
@@ -172,6 +171,157 @@ export function extractWallOpenings(
 }
 
 /**
+ * Merge overlapping/adjacent 2D axis-aligned boxes transitively (fixed-point connected components)
+ * so room iteration order `[A, C, B]` always merges into one unified building envelope while
+ * genuinely detached structures remain separate clusters.
+ */
+function mergeConnectedBoxes(
+  boxes: ReadonlyArray<{ minX: number; maxX: number; minZ: number; maxZ: number }>,
+  gapToleranceM: number,
+): Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> {
+  const clusters = boxes.map((b) => ({ ...b }))
+  let merged = true
+  while (merged) {
+    merged = false
+    for (let i = 0; i < clusters.length; i++) {
+      const a = clusters[i]!
+      for (let j = i + 1; j < clusters.length; j++) {
+        const b = clusters[j]!
+        if (
+          a.minX <= b.maxX + gapToleranceM &&
+          a.maxX >= b.minX - gapToleranceM &&
+          a.minZ <= b.maxZ + gapToleranceM &&
+          a.maxZ >= b.minZ - gapToleranceM
+        ) {
+          a.minX = Math.min(a.minX, b.minX)
+          a.maxX = Math.max(a.maxX, b.maxX)
+          a.minZ = Math.min(a.minZ, b.minZ)
+          a.maxZ = Math.max(a.maxZ, b.maxZ)
+          clusters.splice(j, 1)
+          merged = true
+          break
+        }
+      }
+      if (merged) break
+    }
+  }
+  return clusters
+}
+
+/**
+ * Partition slabs and walls on a level into connected building footprint clusters.
+ * Guarantees detached rooms/buildings on the same level never bridge empty yard with
+ * a single giant roof, girder, or ridge beam.
+ */
+export function clusterLevelFootprints(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null,
+  gapToleranceM = 0.35,
+): FootprintCluster[] {
+  const levelNodes = Object.values(nodes).filter((n) => belongsToLevel(nodes, n, levelId))
+  const walls = levelNodes.filter(
+    (n) => n.type === 'wall' && n.visible !== false && Array.isArray(n.start) && Array.isArray(n.end),
+  )
+  const slabs = levelNodes.filter(
+    (n) => n.type === 'slab' && n.visible !== false && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3,
+  )
+
+  const slabBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> = []
+  for (const slab of slabs) {
+    let minX = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let minZ = Number.POSITIVE_INFINITY
+    let maxZ = Number.NEGATIVE_INFINITY
+    for (const [px, pz] of slab.polygon as ReadonlyArray<Vec2>) {
+      if (Number.isFinite(px) && Number.isFinite(pz)) {
+        if (px < minX) minX = px
+        if (px > maxX) maxX = px
+        if (pz < minZ) minZ = pz
+        if (pz > maxZ) maxZ = pz
+      }
+    }
+    if (Number.isFinite(minX) && maxX - minX > 0.5 && maxZ - minZ > 0.5) {
+      slabBoxes.push({ minX, maxX, minZ, maxZ })
+    }
+  }
+  const seedBoxes = slabBoxes.map((b) => ({ ...b }))
+
+  // Also include wall-only structures not covered by any slab
+  const wallBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; height: number }> = []
+  for (const w of walls) {
+    const sx = Number(w.start![0])
+    const sz = Number(w.start![1])
+    const ex = Number(w.end![0])
+    const ez = Number(w.end![1])
+    if (!Number.isFinite(sx) || !Number.isFinite(sz) || !Number.isFinite(ex) || !Number.isFinite(ez)) continue
+    const wb = {
+      minX: Math.min(sx, ex),
+      maxX: Math.max(sx, ex),
+      minZ: Math.min(sz, ez),
+      maxZ: Math.max(sz, ez),
+      height: typeof w.height === 'number' && w.height > 0 ? w.height : 2.55,
+    }
+    wallBoxes.push(wb)
+    const touchesSlab = slabBoxes.some(
+      (sb) =>
+        wb.minX <= sb.maxX + gapToleranceM &&
+        wb.maxX >= sb.minX - gapToleranceM &&
+        wb.minZ <= sb.maxZ + gapToleranceM &&
+        wb.maxZ >= sb.minZ - gapToleranceM,
+    )
+    if (!touchesSlab) {
+      seedBoxes.push({ minX: wb.minX, maxX: wb.maxX, minZ: wb.minZ, maxZ: wb.maxZ })
+    }
+  }
+
+  const merged = mergeConnectedBoxes(seedBoxes, gapToleranceM)
+  if (merged.length === 0) {
+    const b = computeLevelBounds(nodes, levelId)
+    return [
+      {
+        minX: b.minX,
+        maxX: b.maxX,
+        minZ: b.minZ,
+        maxZ: b.maxZ,
+        widthM: Math.max(0, b.maxX - b.minX),
+        depthM: Math.max(0, b.maxZ - b.minZ),
+        avgWallHeightM: b.avgWallHeightM,
+      },
+    ]
+  }
+
+  const globalAvgH =
+    wallBoxes.length > 0 ? wallBoxes.reduce((s, w) => s + w.height, 0) / wallBoxes.length : 2.55
+
+  return merged
+    .filter((c) => c.maxX - c.minX > 0.5 && c.maxZ - c.minZ > 0.5)
+    .map((c) => {
+      let hSum = 0
+      let hCount = 0
+      for (const wb of wallBoxes) {
+        if (
+          wb.minX <= c.maxX + gapToleranceM &&
+          wb.maxX >= c.minX - gapToleranceM &&
+          wb.minZ <= c.maxZ + gapToleranceM &&
+          wb.maxZ >= c.minZ - gapToleranceM
+        ) {
+          hSum += wb.height
+          hCount += 1
+        }
+      }
+      return {
+        minX: c.minX,
+        maxX: c.maxX,
+        minZ: c.minZ,
+        maxZ: c.maxZ,
+        widthM: c.maxX - c.minX,
+        depthM: c.maxZ - c.minZ,
+        avgWallHeightM: hCount > 0 ? hSum / hCount : globalAvgH,
+      }
+    })
+}
+
+/**
  * Compute world-space XZ bounds of a level from its walls and slabs.
  */
 export function computeLevelBounds(
@@ -186,7 +336,7 @@ export function computeLevelBounds(
   let hCount = 0
 
   for (const n of Object.values(nodes)) {
-    if (!belongsToStructuralLevel(nodes, n, levelId)) continue
+    if (!belongsToLevel(nodes, n, levelId)) continue
     if (n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end)) {
       const sx = Number(n.start[0])
       const sz = Number(n.start[1])

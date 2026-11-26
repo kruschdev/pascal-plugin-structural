@@ -55,4 +55,37 @@ if (tscProc.exitCode !== 0) {
   process.exit(tscProc.exitCode ?? 1)
 }
 
-console.log(`Built ${result.outputs.length} ESM output(s) + .d.ts declarations into dist/.`)
+// Post-build Turbopack safety gate:
+// 1. Zero dynamic `import("./chunk-...")` expressions (prevents file:///ROOT/... cold-load hang in Next.js 16 Turbopack)
+// 2. Zero mid-file `'use client'` directives hoisted below imports by Bun.build splitting
+const jsFiles: string[] = []
+const walk = (dir: string) => {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) walk(full)
+    else if (entry.name.endsWith('.js')) jsFiles.push(full)
+  }
+}
+walk(distDir)
+
+const violations: string[] = []
+for (const file of jsFiles) {
+  const rel = path.relative(rootDir, file)
+  const text = fs.readFileSync(file, 'utf8')
+  if (/import\s*\(\s*["']\.\/chunk-/.test(text)) {
+    violations.push(`${rel}: contains dynamic chunk import("./chunk-...") which breaks Turbopack resolution`)
+  }
+  const lines = text.split('\n')
+  for (let i = 1; i < lines.length; i++) {
+    if (/^\s*['"]use client['"];?\s*$/.test(lines[i]!)) {
+      violations.push(`${rel}:${i + 1}: mid-file "use client" directive below imports`)
+    }
+  }
+}
+if (violations.length > 0) {
+  console.error('Post-build Turbopack safety gate FAILED:')
+  for (const v of violations) console.error(`  - ${v}`)
+  process.exit(1)
+}
+
+console.log(`Built ${result.outputs.length} ESM output(s) + .d.ts declarations into dist/ (Turbopack chunk gate PASSED).`)

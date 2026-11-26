@@ -9,18 +9,19 @@ import { useEffect, useMemo, useState } from 'react'
 import { structuralAgentOperations } from '../agent-operations'
 import { auditStructuralScene } from '../irc/audit'
 import { computeLevelBounds } from '../irc/openings'
-import type {
-  BeamMaterialFamily,
-  ColumnType,
-  ExposureCategory,
-  FirestopKind,
-  FloorSystemKind,
-  LumberSpecies,
-  RoofSystemKind,
-  SceneNodeLike,
-  SeismicCategory,
-  StudSize,
-  StudSpacingIn,
+import {
+  type BeamMaterialFamily,
+  type ColumnType,
+  type ExposureCategory,
+  type FirestopKind,
+  type FloorSystemKind,
+  type LumberSpecies,
+  type RoofSystemKind,
+  type SceneNodeLike,
+  type SeismicCategory,
+  type StudSize,
+  type StudSpacingIn,
+  belongsToLevel,
 } from '../irc/tables'
 import {
   type StructuralLayerKey,
@@ -28,6 +29,7 @@ import {
   useStructuralUi,
 } from './store'
 
+export { belongsToLevel }
 export const STRUCTURAL_SCHEDULE_VIEW_ID = 'krusch:structural:schedule'
 
 const ASSEMBLY_LAYER_KEYS: ReadonlySet<StructuralLayerKey> = new Set([
@@ -48,23 +50,6 @@ export function activeLevelOf(
     if (n.type === 'level') return n.id
   }
   return null
-}
-
-export function belongsToLevel(
-  record: Readonly<Record<string, SceneNodeLike>>,
-  node: SceneNodeLike,
-  levelId: string | null,
-): boolean {
-  if (!levelId) return true
-  let cur: SceneNodeLike | undefined = node
-  const seen = new Set<string>()
-  while (cur?.parentId && !seen.has(cur.id)) {
-    if (cur.parentId === levelId) return true
-    seen.add(cur.id)
-    cur = record[cur.parentId]
-    if (cur?.type === 'level') return cur.id === levelId
-  }
-  return false
 }
 
 function layerForNodeType(type: string): StructuralLayerKey | null {
@@ -158,6 +143,7 @@ export default function StructuralHostPanel() {
   const deleteNodes = useScene((s) => s.deleteNodes)
   const updateNodes = useScene((s) => s.updateNodes)
   const selectedLevelId = useViewer((s) => s.selection.levelId)
+  const viewerWallMode = useViewer((s) => (s as unknown as { wallMode?: string }).wallMode)
 
   const codeEdition = useStructuralUi((s) => s.codeEdition)
   const species = useStructuralUi((s) => s.species)
@@ -192,6 +178,8 @@ export default function StructuralHostPanel() {
   const setWallModeBeforeXray = useStructuralUi((s) => s.setWallModeBeforeXray)
   const toggleLayerVisibility = useStructuralUi((s) => s.toggleLayerVisibility)
 
+  const isXrayActive = typeof viewerWallMode === 'string' ? viewerWallMode === 'down' : xrayActive
+
   const applyXrayMode = (enable: boolean) => {
     const viewerState = useViewer.getState() as unknown as {
       wallMode?: string
@@ -205,7 +193,7 @@ export default function StructuralHostPanel() {
       setXrayActive(true)
     } else {
       if (viewerState.setWallMode && viewerState.wallMode === 'down') {
-        viewerState.setWallMode(wallModeBeforeXray ?? 'up')
+        viewerState.setWallMode(wallModeBeforeXray && wallModeBeforeXray !== 'down' ? wallModeBeforeXray : 'up')
       }
       setXrayActive(false)
     }
@@ -475,9 +463,9 @@ export default function StructuralHostPanel() {
           onClick={() => applyXrayMode(false)}
           style={{
             ...ghostBtnStyle,
-            borderColor: !xrayActive ? 'rgba(245,158,11,0.75)' : 'var(--border, rgba(255,255,255,0.18))',
-            background: !xrayActive ? 'rgba(245,158,11,0.16)' : 'transparent',
-            fontWeight: !xrayActive ? 600 : 400,
+            borderColor: !isXrayActive ? 'rgba(245,158,11,0.75)' : 'var(--border, rgba(255,255,255,0.18))',
+            background: !isXrayActive ? 'rgba(245,158,11,0.16)' : 'transparent',
+            fontWeight: !isXrayActive ? 600 : 400,
           }}
         >
           Finished View
@@ -487,9 +475,9 @@ export default function StructuralHostPanel() {
           onClick={() => applyXrayMode(true)}
           style={{
             ...ghostBtnStyle,
-            borderColor: xrayActive ? 'rgba(56,189,248,0.8)' : 'var(--border, rgba(255,255,255,0.18))',
-            background: xrayActive ? 'rgba(56,189,248,0.18)' : 'transparent',
-            fontWeight: xrayActive ? 600 : 400,
+            borderColor: isXrayActive ? 'rgba(56,189,248,0.8)' : 'var(--border, rgba(255,255,255,0.18))',
+            background: isXrayActive ? 'rgba(56,189,248,0.18)' : 'transparent',
+            fontWeight: isXrayActive ? 600 : 400,
           }}
         >
           Framing X-Ray

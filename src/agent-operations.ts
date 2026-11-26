@@ -33,15 +33,34 @@ import {
   type StudSpacingIn,
   type Vec2,
   type Vec3,
+  belongsToLevel,
   getConnectorBySku,
 } from './irc/tables'
+
+export type AgentOperationChanges = {
+  delete?: string[]
+  create?: Array<{ node: SceneNodeLike; parentId: string | null }>
+}
 
 export type AgentOperationResult = {
   ok: boolean
   tool: string
   text: string
   createdNodes?: SceneNodeLike[]
+  changes?: AgentOperationChanges
   data: Record<string, unknown>
+}
+
+function toCreateChanges(
+  createdNodes: ReadonlyArray<SceneNodeLike>,
+  fallbackParentId: string | null = null,
+): AgentOperationChanges {
+  return {
+    create: createdNodes.map((n) => ({
+      node: n,
+      parentId: (n.parentId as string | null) ?? fallbackParentId,
+    })),
+  }
 }
 
 let opSeq = 1
@@ -53,14 +72,14 @@ export const structuralAgentOperations = {
   structural_autopopulate_irc(
     nodes: Readonly<Record<string, SceneNodeLike>>,
     args: AutopopulateStructuralOptions & { clearExisting?: boolean } = {},
-  ): AgentOperationResult & { changes?: { delete?: string[]; create?: Array<{ node: SceneNodeLike; parentId: string | null }> } } {
+  ): AgentOperationResult {
     const targetLevelId = args.levelId ?? null
     const deletedIds: string[] = []
     const baseNodes: Record<string, SceneNodeLike> = { ...nodes }
     if (args.clearExisting !== false) {
-      for (const [id, n] of Object.entries(baseNodes)) {
+      for (const [id, n] of Object.entries(nodes)) {
         if (!String(n.type ?? '').startsWith('structural:')) continue
-        if (!targetLevelId || n.parentId === targetLevelId) {
+        if (!targetLevelId || belongsToLevel(nodes, n, targetLevelId)) {
           deletedIds.push(id)
           delete baseNodes[id]
         }
@@ -74,7 +93,7 @@ export const structuralAgentOperations = {
       createdNodes: res.createdNodes,
       changes: {
         ...(deletedIds.length > 0 ? { delete: deletedIds } : {}),
-        create: res.createdNodes.map((n) => ({ node: n, parentId: (n.parentId as string | null) ?? targetLevelId })),
+        ...toCreateChanges(res.createdNodes, targetLevelId),
       },
       data: {
         summary: res.summary,
@@ -179,6 +198,7 @@ export const structuralAgentOperations = {
       tool: 'structural_place_beam',
       text: `Placed ${check.entry.designation} (${spanFt.toFixed(1)} ft span, bending ${Math.round(check.bendingUtilization * 100)}%, L/${check.liveDeflectionRatio}, ${check.jackStudsEachEnd} jack(s)/end, hanger ${check.recommendedHangerSku}).`,
       createdNodes,
+      changes: toCreateChanges(createdNodes, args.levelId ?? null),
       data: { beamId, sizing: check },
     }
   },
@@ -279,6 +299,7 @@ export const structuralAgentOperations = {
       tool: 'structural_place_column',
       text: `Placed ${sizing.entry.designation} (${Math.round(sizing.utilization * 100)}% axial capacity) on ${sizing.footingWidthIn}"x${sizing.footingWidthIn}"x${sizing.footingDepthIn}" footing with ${sizing.recommendedBaseSku} base + ${sizing.recommendedCapSku} cap.`,
       createdNodes,
+      changes: toCreateChanges(createdNodes, args.levelId ?? null),
       data: { columnId: colId, sizing },
     }
   },
@@ -326,6 +347,7 @@ export const structuralAgentOperations = {
       tool: 'structural_place_connector',
       text: `Placed ${cat.sku} (${cat.name}, qty ${node.quantity}, ${cat.fastenerSpec}).`,
       createdNodes: [node],
+      changes: toCreateChanges([node], args.levelId ?? null),
       data: { connectorId: id, spec: cat },
     }
   },
@@ -372,6 +394,7 @@ export const structuralAgentOperations = {
       tool: 'structural_place_firestop',
       text: `Placed ${rule.codeRef} firestop (${args.firestopKind}, ${material}).`,
       createdNodes: [node],
+      changes: toCreateChanges([node], args.levelId ?? null),
       data: { firestopId: id, rule },
     }
   },

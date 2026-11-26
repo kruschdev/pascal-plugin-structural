@@ -919,13 +919,17 @@ export function belongsToLevel(
   levelId: string | null,
 ): boolean {
   if (!levelId) return true
-  if (node.id === levelId || node.parentId === levelId) return true
+  if (node.type === 'level') return node.id === levelId
+  if (node.parentId === levelId) return true
   let cur: SceneNodeLike | undefined = node
-  let guard = 0
-  while (cur?.parentId && guard < 12) {
+  const seen = new Set<string>()
+  while (cur?.parentId && !seen.has(cur.id)) {
     if (cur.parentId === levelId) return true
-    cur = nodes[cur.parentId]
-    guard += 1
+    seen.add(cur.id)
+    const parent: SceneNodeLike | undefined = nodes[cur.parentId]
+    if (!parent) return false
+    if (parent.type === 'level') return parent.id === levelId
+    cur = parent
   }
   return false
 }

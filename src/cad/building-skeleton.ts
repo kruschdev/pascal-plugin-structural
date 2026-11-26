@@ -30,7 +30,7 @@ import {
   Quaternion,
   Vector3,
 } from 'three'
-import { belongsToStructuralLevel, computeLevelBounds, extractWallOpenings } from '../irc/openings'
+import { clusterLevelFootprints, computeLevelBounds, extractWallOpenings } from '../irc/openings'
 import {
   type FloorSystemKind,
   INCHES_TO_METERS,
@@ -38,6 +38,7 @@ import {
   type RoofSystemKind,
   type SceneNodeLike,
   type Vec2,
+  belongsToLevel,
 } from '../irc/tables'
 
 type BucketId =
@@ -69,17 +70,29 @@ const PLATE_THICK_M = 1.5 * INCHES_TO_METERS // 0.0381 m
 const STUD_THICK_M = 1.5 * INCHES_TO_METERS // 0.0381 m
 const TEN_FT_M = 10 * 12 * INCHES_TO_METERS // 3.048 m
 
-function createSkeletonMaterials(species: LumberSpecies): Record<BucketId, MeshStandardMaterial> {
+/**
+ * Lazily allocate a fresh isolated MeshStandardMaterial for a single populated bucket
+ * so zero unused materials are ever created or leaked when buckets are empty.
+ */
+function createBucketMaterial(bucketId: BucketId, species: LumberSpecies): MeshStandardMaterial {
   const lumberHex = SPECIES_LUMBER_HEX[species] ?? SPECIES_LUMBER_HEX['df-l-2']
-  return {
-    lumber: new MeshStandardMaterial({ color: lumberHex, roughness: 0.78, metalness: 0.02 }),
-    'pt-sill': new MeshStandardMaterial({ color: 0x6b8b52, roughness: 0.84, metalness: 0.02 }),
-    'header-lvl': new MeshStandardMaterial({ color: 0xc2782d, roughness: 0.68, metalness: 0.05 }),
-    'osb-web': new MeshStandardMaterial({ color: 0xb08647, roughness: 0.88, metalness: 0.01 }),
-    'galv-steel': new MeshStandardMaterial({ color: 0xd1d8e0, roughness: 0.28, metalness: 0.84 }),
-    'holddown-steel': new MeshStandardMaterial({ color: 0x64748b, roughness: 0.32, metalness: 0.82 }),
-    concrete: new MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.94, metalness: 0.0 }),
-    firestop: new MeshStandardMaterial({ color: 0xdc3f2e, roughness: 0.72, metalness: 0.04 }),
+  switch (bucketId) {
+    case 'lumber':
+      return new MeshStandardMaterial({ color: lumberHex, roughness: 0.78, metalness: 0.02 })
+    case 'pt-sill':
+      return new MeshStandardMaterial({ color: 0x6b8b52, roughness: 0.84, metalness: 0.02 })
+    case 'header-lvl':
+      return new MeshStandardMaterial({ color: 0xc2782d, roughness: 0.68, metalness: 0.05 })
+    case 'osb-web':
+      return new MeshStandardMaterial({ color: 0xb08647, roughness: 0.88, metalness: 0.01 })
+    case 'galv-steel':
+      return new MeshStandardMaterial({ color: 0xd1d8e0, roughness: 0.28, metalness: 0.84 })
+    case 'holddown-steel':
+      return new MeshStandardMaterial({ color: 0x64748b, roughness: 0.32, metalness: 0.82 })
+    case 'concrete':
+      return new MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.94, metalness: 0.0 })
+    case 'firestop':
+      return new MeshStandardMaterial({ color: 0xdc3f2e, roughness: 0.72, metalness: 0.04 })
   }
 }
 
@@ -149,6 +162,51 @@ type ExtractedRoofSegment = {
   wallHeightM: number
 }
 
+function levelSortOrder(level: SceneNodeLike): number {
+  if (typeof level.level === 'number' && Number.isFinite(level.level)) return level.level
+  if (typeof level.elevation === 'number' && Number.isFinite(level.elevation)) return level.elevation
+  return 0
+}
+
+function shouldAdoptWallLessRoofLevel(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  targetLevelId: string,
+  roofLevel: SceneNodeLike,
+): boolean {
+  const targetLevel = nodes[targetLevelId]
+  if (!targetLevel) return false
+  // Must belong to the same parent building (when parentIds are set)
+  if (
+    typeof targetLevel.parentId === 'string' &&
+    typeof roofLevel.parentId === 'string' &&
+    targetLevel.parentId !== roofLevel.parentId
+  ) {
+    return false
+  }
+  const allValues = Object.values(nodes)
+  const roofLevelHasWalls = allValues.some(
+    (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, roofLevel.id),
+  )
+  if (roofLevelHasWalls) return false
+
+  const roofOrder = levelSortOrder(roofLevel)
+  const siblingWalledLevels = allValues
+    .filter(
+      (n) =>
+        n.type === 'level' &&
+        n.id !== roofLevel.id &&
+        n.parentId === roofLevel.parentId &&
+        allValues.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id)),
+    )
+    .sort((a, b) => levelSortOrder(a) - levelSortOrder(b))
+
+  if (siblingWalledLevels.length === 0) return false
+  // Adopt only onto the highest walled level strictly below (or equal if order tied) the wall-less roof level
+  const belowRoof = siblingWalledLevels.filter((l) => levelSortOrder(l) <= roofOrder)
+  const hostLevel = belowRoof.length > 0 ? belowRoof[belowRoof.length - 1]! : siblingWalledLevels[siblingWalledLevels.length - 1]!
+  return hostLevel.id === targetLevelId
+}
+
 function extractLevelRoofSegments(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
@@ -175,11 +233,7 @@ function extractLevelRoofSegments(
       const parent = nodes[curParentId]
       if (!parent) break
       if (parent.type === 'level') {
-        // Also allow a wall-less upper roof level sitting directly above this level
-        const upperHasWalls = Object.values(nodes).some(
-          (w) => w.type === 'wall' && belongsToStructuralLevel(nodes, w, parent.id),
-        )
-        belongsHere = !upperHasWalls
+        belongsHere = shouldAdoptWallLessRoofLevel(nodes, levelId, parent)
         break
       }
       if (parent.type === 'roof') {
@@ -210,8 +264,8 @@ function extractLevelRoofSegments(
           : Math.min((65 * Math.PI) / 180, rawPitch)
     const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
     const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
-    // Seat roof eaves right on top of the level's double top plates
-    const cy = py > 1.2 ? py + segWallH : defaultWallHeightM
+    // Seat roof eaves right on top of the level's double top plates and consistently honor segment knee-wall height
+    const cy = py > 0.05 ? py + segWallH : defaultWallHeightM + segWallH
 
     out.push({
       cx: px,
@@ -269,7 +323,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       { construction?: string; studSize?: string; studSpacingIn?: number } | string
     > | undefined) ?? {}
 
-  const allLevelNodes = Object.values(nodes).filter((n) => belongsToStructuralLevel(nodes, n, levelId))
+  const allLevelNodes = Object.values(nodes).filter((n) => belongsToLevel(nodes, n, levelId))
   const walls = allLevelNodes.filter((n) => n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end))
   const slabs = allLevelNodes.filter(
     (n) => n.type === 'slab' && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3,
@@ -447,11 +501,13 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     const openExclusions: Array<{ u0: number; u1: number; uInner0: number; uInner1: number; sillY: number; headerTopY: number; kind: 'door' | 'window' }> = []
     for (const op of openings) {
       const halfW = op.widthM / 2
-      const uLeft = Math.max(STUD_THICK_M * 3, op.uCenterM - halfW)
-      const uRight = Math.min(wallLenM - STUD_THICK_M * 3, op.uCenterM + halfW)
+      const jacksEachEnd = op.widthM > 1.52 ? 2 : 1
+      // Reserve corner-pack (2 studs) + king (1) + jacks so opening framing never overlaps end studs
+      const minMargin = Math.min(wallLenM * 0.2, STUD_THICK_M * (jacksEachEnd + 3))
+      const uLeft = Math.max(minMargin, op.uCenterM - halfW)
+      const uRight = Math.min(wallLenM - minMargin, op.uCenterM + halfW)
       if (uRight - uLeft < 0.35) continue
 
-      const jacksEachEnd = op.widthM > 1.52 ? 2 : 1
       const headerDepthM = (op.widthM > 2.4 ? 11.875 : op.widthM > 1.5 ? 9.25 : 7.25) * INCHES_TO_METERS
       const headerBotY = Math.min(doubleTopBottomY - 0.12, baseY + op.headYM)
       const headerTopY = Math.min(doubleTopBottomY, headerBotY + headerDepthM)
@@ -461,14 +517,22 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       for (let j = 0; j < jacksEachEnd; j++) {
         const uJackL = uLeft - STUD_THICK_M * (j + 0.5)
         const uJackR = uRight + STUD_THICK_M * (j + 0.5)
-        pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uJackL, studBaseY + jackH / 2, STUD_THICK_M, jackH, studDepthM)
-        pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uJackR, studBaseY + jackH / 2, STUD_THICK_M, jackH, studDepthM)
+        if (uJackL > STUD_THICK_M * 2) {
+          pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uJackL, studBaseY + jackH / 2, STUD_THICK_M, jackH, studDepthM)
+        }
+        if (uJackR < wallLenM - STUD_THICK_M * 2) {
+          pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uJackR, studBaseY + jackH / 2, STUD_THICK_M, jackH, studDepthM)
+        }
       }
 
       const uKingL = uLeft - STUD_THICK_M * (jacksEachEnd + 0.5)
       const uKingR = uRight + STUD_THICK_M * (jacksEachEnd + 0.5)
-      pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uKingL, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
-      pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uKingR, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
+      if (uKingL > STUD_THICK_M * 2) {
+        pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uKingL, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
+      }
+      if (uKingR < wallLenM - STUD_THICK_M * 2) {
+        pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uKingR, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
+      }
 
       const headerSpanM = uRight - uLeft + STUD_THICK_M * jacksEachEnd * 2
       pushWallBox('header-lvl', sx, sz, ux, uz, nx, nz, rotY, (uLeft + uRight) / 2, headerBotY + actualHeaderH / 2, headerSpanM, actualHeaderH, studDepthM + 0.004)
@@ -497,18 +561,24 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
     // Field common studs @ OC + strictly bounded upper/lower cripples (NEVER inside opening glass!)
     for (let u = spacingM; u < wallLenM - STUD_THICK_M * 2.5; u += spacingM) {
-      const hitOp = openExclusions.find((op) => u >= op.u0 && u <= op.u1)
-      if (!hitOp) {
+      const coveringOps = openExclusions.filter((op) => u >= op.u0 && u <= op.u1)
+      if (coveringOps.length === 0) {
         pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
-      } else if (u >= hitOp.uInner0 && u <= hitOp.uInner1) {
-        const upperH = doubleTopBottomY - hitOp.headerTopY
-        if (upperH > 0.05) {
-          pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, hitOp.headerTopY + upperH / 2, STUD_THICK_M, upperH, studDepthM)
-        }
-        if (hitOp.kind === 'window') {
-          const lowerH = hitOp.sillY - PLATE_THICK_M * 2 - studBaseY
-          if (lowerH > 0.05) {
-            pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, studBaseY + lowerH / 2, STUD_THICK_M, lowerH, studDepthM)
+      } else {
+        // Only emit cripples when u falls cleanly inside opening interiors and NOT inside any adjacent jamb/king zone
+        const inAnyJambZone = coveringOps.some((op) => u < op.uInner0 || u > op.uInner1)
+        if (!inAnyJambZone) {
+          const maxHeaderTopY = coveringOps.reduce((m, op) => Math.max(m, op.headerTopY), studBaseY)
+          const upperH = doubleTopBottomY - maxHeaderTopY
+          if (upperH > 0.05) {
+            pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, maxHeaderTopY + upperH / 2, STUD_THICK_M, upperH, studDepthM)
+          }
+          if (coveringOps.every((op) => op.kind === 'window')) {
+            const minSillY = coveringOps.reduce((m, op) => Math.min(m, op.sillY), doubleTopBottomY)
+            const lowerH = minSillY - PLATE_THICK_M * 2 - studBaseY
+            if (lowerH > 0.05) {
+              pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, studBaseY + lowerH / 2, STUD_THICK_M, lowerH, studDepthM)
+            }
           }
         }
       }
@@ -633,56 +703,18 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   if (showRoof) {
     let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM)
 
-    // Fallback when no roof-segment exists yet: synthesize gable roofs per connected slab cluster
+    // Fallback when no roof-segment exists yet: synthesize gable roofs per transitively connected footprint cluster
     // (never stretching a single floating roof across empty yard between detached rooms/structures!)
     if (roofSegments.length === 0 && walls.length >= 2) {
-      const slabBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> = []
-      for (const slab of slabs) {
-        const poly = slab.polygon as ReadonlyArray<Vec2>
-        let minX = Number.POSITIVE_INFINITY
-        let maxX = Number.NEGATIVE_INFINITY
-        let minZ = Number.POSITIVE_INFINITY
-        let maxZ = Number.NEGATIVE_INFINITY
-        for (const [px, pz] of poly) {
-          if (px < minX) minX = px
-          if (px > maxX) maxX = px
-          if (pz < minZ) minZ = pz
-          if (pz > maxZ) maxZ = pz
-        }
-        if (Number.isFinite(minX) && maxX - minX > 1.2 && maxZ - minZ > 1.2) {
-          slabBoxes.push({ minX, maxX, minZ, maxZ })
-        }
-      }
-      // Merge touching/overlapping slab boxes (<= 0.35 m gap) into unified building footprints
-      const clusters: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> = []
-      for (const sb of slabBoxes) {
-        const hit = clusters.find(
-          (c) =>
-            sb.minX <= c.maxX + 0.35 &&
-            sb.maxX >= c.minX - 0.35 &&
-            sb.minZ <= c.maxZ + 0.35 &&
-            sb.maxZ >= c.minZ - 0.35,
-        )
-        if (hit) {
-          hit.minX = Math.min(hit.minX, sb.minX)
-          hit.maxX = Math.max(hit.maxX, sb.maxX)
-          hit.minZ = Math.min(hit.minZ, sb.minZ)
-          hit.maxZ = Math.max(hit.maxZ, sb.maxZ)
-        } else {
-          clusters.push({ ...sb })
-        }
-      }
-      const fallbackEnvelopes =
-        clusters.length > 0 ? clusters : [computeLevelBounds(nodes, levelId)]
-      const bInfo = computeLevelBounds(nodes, levelId)
-      for (const env of fallbackEnvelopes) {
+      const clusters = clusterLevelFootprints(nodes, levelId, 0.35)
+      for (const env of clusters) {
         const spanX = env.maxX - env.minX
         const spanZ = env.maxZ - env.minZ
         if (spanX > 1.5 && spanZ > 1.5) {
           const ridgeAlongX = spanX >= spanZ
           roofSegments.push({
             cx: (env.minX + env.maxX) / 2,
-            cy: bInfo.avgWallHeightM,
+            cy: env.avgWallHeightM,
             cz: (env.minZ + env.maxZ) / 2,
             yaw: ridgeAlongX ? 0 : Math.PI / 2,
             roofType: 'gable',
@@ -844,7 +876,6 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     else byBucket.set(b.bucket, [b])
   }
 
-  const mats = createSkeletonMaterials(species)
   const unitBox = new BoxGeometry(1, 1, 1)
   const mat4 = new Matrix4()
   const pos = new Vector3()
@@ -855,7 +886,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   for (const [bucketId, list] of byBucket.entries()) {
     if (list.length === 0) continue
     const geom = unitBox.clone()
-    const inst = new InstancedMesh(geom, mats[bucketId], list.length)
+    const mat = createBucketMaterial(bucketId, species)
+    const inst = new InstancedMesh(geom, mat, list.length)
     inst.name = `structural-skeleton-${bucketId}`
     inst.castShadow = bucketId !== 'concrete'
     inst.receiveShadow = true

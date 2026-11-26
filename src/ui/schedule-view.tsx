@@ -11,24 +11,51 @@
  */
 
 import { useScene, useViewer } from '@pascal-app/editor'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { StructuralBomCategory } from '../irc/pricing'
 import { generateStructuralSchedulePack } from '../irc/schedule'
 import type { SceneNodeLike } from '../irc/tables'
 import {
   type StructuralScheduleTab,
-  selectDesignParamsFromUi,
   useStructuralUi,
 } from './store'
 
 export default function StructuralScheduleView() {
   const nodes = useScene((s) => s.nodes)
   const setSelection = useViewer((s) => s.setSelection)
-  const ui = useStructuralUi()
+  const codeEdition = useStructuralUi((s) => s.codeEdition)
+  const species = useStructuralUi((s) => s.species)
+  const groundSnowPsf = useStructuralUi((s) => s.groundSnowPsf)
+  const windMph = useStructuralUi((s) => s.windMph)
+  const exposure = useStructuralUi((s) => s.exposure)
+  const seismicCategory = useStructuralUi((s) => s.seismicCategory)
+  const frostDepthIn = useStructuralUi((s) => s.frostDepthIn)
+  const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
+  const activeTab = useStructuralUi((s) => s.activeTab)
+  const setActiveTab = useStructuralUi((s) => s.setActiveTab)
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    }
+  }, [])
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
-  const designOverride = useMemo(() => selectDesignParamsFromUi(ui), [ui])
+  const designOverride = useMemo(
+    () => ({
+      codeEdition,
+      species,
+      groundSnowPsf,
+      windMph,
+      exposure,
+      seismicCategory,
+      frostDepthIn,
+      soilBearingPsf,
+    }),
+    [codeEdition, species, groundSnowPsf, windMph, exposure, seismicCategory, frostDepthIn, soilBearingPsf],
+  )
   const pack = useMemo(
     () => generateStructuralSchedulePack(record, designOverride),
     [record, designOverride],
@@ -37,7 +64,11 @@ export default function StructuralScheduleView() {
   const copyText = (label: string, content: string) => {
     navigator.clipboard?.writeText(content).catch(() => {})
     setCopiedMsg(`Copied ${label}`)
-    setTimeout(() => setCopiedMsg(null), 2200)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => {
+      setCopiedMsg(null)
+      copyTimerRef.current = null
+    }, 2200)
   }
 
   const totalConnectors = useMemo(
@@ -125,16 +156,16 @@ export default function StructuralScheduleView() {
           <button
             key={id}
             type="button"
-            onClick={() => ui.setActiveTab(id)}
+            onClick={() => setActiveTab(id)}
             style={{
               padding: '5px 10px',
               borderRadius: 6,
               border: '1px solid var(--border, rgba(255,255,255,0.18))',
-              background: ui.activeTab === id ? 'rgba(245,158,11,0.25)' : 'transparent',
+              background: activeTab === id ? 'rgba(245,158,11,0.25)' : 'transparent',
               color: 'inherit',
               cursor: 'pointer',
               fontSize: 11,
-              fontWeight: ui.activeTab === id ? 600 : 400,
+              fontWeight: activeTab === id ? 600 : 400,
             }}
           >
             {label}
@@ -143,7 +174,7 @@ export default function StructuralScheduleView() {
       </div>
 
       {/* Tab 1: Beams & Headers */}
-      {ui.activeTab === 'beams' && (
+      {activeTab === 'beams' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {pack.beams.length === 0 ? (
             <EmptyBanner text="No structural beams or headers placed yet. Run Auto-Frame (IRC/NDS) or quick-place a beam from the Structural panel." />
@@ -189,7 +220,7 @@ export default function StructuralScheduleView() {
       )}
 
       {/* Tab 2: Columns & Footings */}
-      {ui.activeTab === 'columns' && (
+      {activeTab === 'columns' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {pack.columns.length === 0 ? (
             <EmptyBanner text="No structural columns or spread footings placed yet." />
@@ -229,7 +260,7 @@ export default function StructuralScheduleView() {
       )}
 
       {/* Tab 3: Connectors & Fasteners */}
-      {ui.activeTab === 'connectors' && (
+      {activeTab === 'connectors' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {pack.connectors.length === 0 ? (
             <EmptyBanner text="No Simpson-class connectors scheduled yet." />
@@ -267,7 +298,7 @@ export default function StructuralScheduleView() {
       )}
 
       {/* Tab 4: Fire Blocking & Draftstopping */}
-      {ui.activeTab === 'firestops' && (
+      {activeTab === 'firestops' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {pack.firestops.length === 0 ? (
             <EmptyBanner text="No IRC R302.11 fire blocking or R302.12 draftstopping zones placed yet." />
@@ -305,7 +336,7 @@ export default function StructuralScheduleView() {
       )}
 
       {/* Tab 5: Load Path & Bracing */}
-      {ui.activeTab === 'load-path' && (
+      {activeTab === 'load-path' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 8 }}>
             <MetricCard
@@ -440,7 +471,7 @@ export default function StructuralScheduleView() {
       )}
 
       {/* Tab 6: IRC Audit */}
-      {ui.activeTab === 'audit' && (
+      {activeTab === 'audit' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {pack.audit.findings.length === 0 && (
             <div
@@ -494,7 +525,7 @@ export default function StructuralScheduleView() {
       )}
 
       {/* Tab 7: Priced BOM */}
-      {ui.activeTab === 'bom' && (
+      {activeTab === 'bom' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
             <div style={{ fontSize: 11, opacity: 0.8 }}>
