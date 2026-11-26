@@ -633,18 +633,57 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   if (showRoof) {
     let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM)
 
-    // Fallback when no roof-segment exists yet: synthesize gable roof matching wall footprint
+    // Fallback when no roof-segment exists yet: synthesize gable roofs per connected slab cluster
+    // (never stretching a single floating roof across empty yard between detached rooms/structures!)
     if (roofSegments.length === 0 && walls.length >= 2) {
-      const b = computeLevelBounds(nodes, levelId)
-      const spanX = b.maxX - b.minX
-      const spanZ = b.maxZ - b.minZ
-      if (spanX > 1.5 && spanZ > 1.5) {
-        const ridgeAlongX = spanX >= spanZ
-        roofSegments = [
-          {
-            cx: (b.minX + b.maxX) / 2,
-            cy: b.avgWallHeightM,
-            cz: (b.minZ + b.maxZ) / 2,
+      const slabBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> = []
+      for (const slab of slabs) {
+        const poly = slab.polygon as ReadonlyArray<Vec2>
+        let minX = Number.POSITIVE_INFINITY
+        let maxX = Number.NEGATIVE_INFINITY
+        let minZ = Number.POSITIVE_INFINITY
+        let maxZ = Number.NEGATIVE_INFINITY
+        for (const [px, pz] of poly) {
+          if (px < minX) minX = px
+          if (px > maxX) maxX = px
+          if (pz < minZ) minZ = pz
+          if (pz > maxZ) maxZ = pz
+        }
+        if (Number.isFinite(minX) && maxX - minX > 1.2 && maxZ - minZ > 1.2) {
+          slabBoxes.push({ minX, maxX, minZ, maxZ })
+        }
+      }
+      // Merge touching/overlapping slab boxes (<= 0.35 m gap) into unified building footprints
+      const clusters: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> = []
+      for (const sb of slabBoxes) {
+        const hit = clusters.find(
+          (c) =>
+            sb.minX <= c.maxX + 0.35 &&
+            sb.maxX >= c.minX - 0.35 &&
+            sb.minZ <= c.maxZ + 0.35 &&
+            sb.maxZ >= c.minZ - 0.35,
+        )
+        if (hit) {
+          hit.minX = Math.min(hit.minX, sb.minX)
+          hit.maxX = Math.max(hit.maxX, sb.maxX)
+          hit.minZ = Math.min(hit.minZ, sb.minZ)
+          hit.maxZ = Math.max(hit.maxZ, sb.maxZ)
+        } else {
+          clusters.push({ ...sb })
+        }
+      }
+      const fallbackEnvelopes =
+        clusters.length > 0 ? clusters : [computeLevelBounds(nodes, levelId)]
+      const bInfo = computeLevelBounds(nodes, levelId)
+      for (const env of fallbackEnvelopes) {
+        const spanX = env.maxX - env.minX
+        const spanZ = env.maxZ - env.minZ
+        if (spanX > 1.5 && spanZ > 1.5) {
+          const ridgeAlongX = spanX >= spanZ
+          roofSegments.push({
+            cx: (env.minX + env.maxX) / 2,
+            cy: bInfo.avgWallHeightM,
+            cz: (env.minZ + env.maxZ) / 2,
             yaw: ridgeAlongX ? 0 : Math.PI / 2,
             roofType: 'gable',
             widthM: ridgeAlongX ? spanX : spanZ,
@@ -652,8 +691,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
             pitchRad: Math.atan(6 / 12),
             overhangM: 0.4,
             wallHeightM: 0,
-          },
-        ]
+          })
+        }
       }
     }
 

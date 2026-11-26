@@ -52,17 +52,34 @@ function makeOpId(prefix: string): string {
 export const structuralAgentOperations = {
   structural_autopopulate_irc(
     nodes: Readonly<Record<string, SceneNodeLike>>,
-    args: AutopopulateStructuralOptions = {},
-  ): AgentOperationResult {
-    const res = autopopulateStructuralScene(nodes, args)
+    args: AutopopulateStructuralOptions & { clearExisting?: boolean } = {},
+  ): AgentOperationResult & { changes?: { delete?: string[]; create?: Array<{ node: SceneNodeLike; parentId: string | null }> } } {
+    const targetLevelId = args.levelId ?? null
+    const deletedIds: string[] = []
+    const baseNodes: Record<string, SceneNodeLike> = { ...nodes }
+    if (args.clearExisting !== false) {
+      for (const [id, n] of Object.entries(baseNodes)) {
+        if (!String(n.type ?? '').startsWith('structural:')) continue
+        if (!targetLevelId || n.parentId === targetLevelId) {
+          deletedIds.push(id)
+          delete baseNodes[id]
+        }
+      }
+    }
+    const res = autopopulateStructuralScene(baseNodes, args)
     return {
       ok: true,
       tool: 'structural_autopopulate_irc',
       text: `Synthesized ${res.createdNodes.length} structural node(s): ${res.summary.assemblies} assembly, ${res.summary.beams} engineered beam(s)/header(s), ${res.summary.columns} column(s), ${res.summary.connectors} connector schedule node(s), and ${res.summary.firestops} IRC R302.11/R302.12 firestop zone(s).`,
       createdNodes: res.createdNodes,
+      changes: {
+        ...(deletedIds.length > 0 ? { delete: deletedIds } : {}),
+        create: res.createdNodes.map((n) => ({ node: n, parentId: (n.parentId as string | null) ?? targetLevelId })),
+      },
       data: {
         summary: res.summary,
         nodeIds: res.createdNodes.map((n) => n.id),
+        deletedIds,
       },
     }
   },

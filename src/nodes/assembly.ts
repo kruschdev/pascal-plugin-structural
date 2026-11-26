@@ -21,6 +21,7 @@ import { Group } from 'three'
 import { z } from 'zod'
 import { buildAssemblyPreviewCad } from '../cad/assemblies'
 import { type AssemblyKind, DEFAULT_DESIGN_PARAMS, type LumberSpecies } from '../irc/tables'
+import StructuralAssemblyRenderer from './assembly-renderer'
 
 export const AssemblyKindEnum = z.enum([
   'wall-framing',
@@ -204,7 +205,7 @@ export const structuralAssemblyRenderDefinition: NodeDefinition<typeof Structura
     snappable: {},
   },
   geometry: buildStructuralAssemblyGeometry,
-  renderer: { kind: 'parametric', module: () => import('./assembly-renderer') },
+  renderer: { kind: 'parametric', module: () => Promise.resolve({ default: StructuralAssemblyRenderer }) },
   geometryKey: (n) =>
     JSON.stringify([
       n.assemblyKind,

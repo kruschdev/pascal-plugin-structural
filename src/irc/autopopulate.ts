@@ -386,7 +386,6 @@ export function autopopulateStructuralScene(
 
   // 5. Floor Girders + Stacked Columns + Post Caps + Post Bases + Joist Hangers
   if (floorSizing.girderLinesNeeded > 0 && floorSizing.recommendedGirder) {
-    const girderCheck = floorSizing.recommendedGirder
     const runsAlongX = maxX - minX >= maxZ - minZ
     for (let g = 1; g <= floorSizing.girderLinesNeeded; g++) {
       const frac = g / (floorSizing.girderLinesNeeded + 1)
@@ -397,33 +396,60 @@ export function autopopulateStructuralScene(
         ? [maxX, minZ + (maxZ - minZ) * frac]
         : [minX + (maxX - minX) * frac, maxZ]
       const girderLenFt = Math.hypot(gEnd[0] - gStart[0], gEnd[1] - gStart[1]) * METERS_TO_FEET
-      const girderId = nextId('strbm')
-      const girderY = -((girderCheck.entry.depthIn * INCHES_TO_METERS) / 2)
-
-      createdNodes.push({
-        id: girderId,
-        type: 'structural:beam',
-        name: `Floor Girder #${g} (${girderCheck.entry.designation})`,
-        parentId: levelId,
-        start: gStart,
-        end: gEnd,
-        elevationY: Number(girderY.toFixed(3)),
-        role: 'floor-girder',
-        beamType: girderCheck.entry.family,
-        designation: girderCheck.entry.designation,
-        plyCount: girderCheck.entry.plyCount,
-        widthIn: girderCheck.entry.widthIn,
-        depthIn: girderCheck.entry.depthIn,
-        species: design.species,
-        mountStyle: 'flush',
+      // Break long floor girders into clear-span bays <= 12 ft supported by intermediate columns
+      const postBays = Math.max(1, Math.ceil(girderLenFt / 12))
+      const baySpanFt = girderLenFt / postBays
+      const girderCheck = sizeBeamOrHeader({
+        spanFt: baySpanFt,
         tributaryWidthFt: floorSizing.effectiveSpanFt,
+        role: 'floor-girder',
         liveLoadPsf: design.floorLiveLoadPsf,
         deadLoadPsf: design.floorDeadLoadPsf,
         snowLoadPsf: 0,
-        bearingLengthIn: girderCheck.requiredBearingIn,
-        jackStudsEachEnd: girderCheck.jackStudsEachEnd,
-        endReactionLbs: girderCheck.shearLbs,
+        species: design.species,
+        preferredFamily: options.preferredBeamFamily ?? floorSizing.recommendedGirder.entry.family,
       })
+      const girderY = -((girderCheck.entry.depthIn * INCHES_TO_METERS) / 2)
+      let firstGirderId = ''
+      const bayGirderIds: string[] = []
+
+      for (let b = 0; b < postBays; b++) {
+        const t0 = b / postBays
+        const t1 = (b + 1) / postBays
+        const bStart: Vec2 = [gStart[0] + (gEnd[0] - gStart[0]) * t0, gStart[1] + (gEnd[1] - gStart[1]) * t0]
+        const bEnd: Vec2 = [gStart[0] + (gEnd[0] - gStart[0]) * t1, gStart[1] + (gEnd[1] - gStart[1]) * t1]
+        const girderId = nextId('strbm')
+        if (!firstGirderId) firstGirderId = girderId
+        bayGirderIds.push(girderId)
+
+        createdNodes.push({
+          id: girderId,
+          type: 'structural:beam',
+          name:
+            postBays > 1
+              ? `Floor Girder #${g}-${b + 1} (${girderCheck.entry.designation})`
+              : `Floor Girder #${g} (${girderCheck.entry.designation})`,
+          parentId: levelId,
+          start: bStart,
+          end: bEnd,
+          elevationY: Number(girderY.toFixed(3)),
+          role: 'floor-girder',
+          beamType: girderCheck.entry.family,
+          designation: girderCheck.entry.designation,
+          plyCount: girderCheck.entry.plyCount,
+          widthIn: girderCheck.entry.widthIn,
+          depthIn: girderCheck.entry.depthIn,
+          species: design.species,
+          mountStyle: 'flush',
+          tributaryWidthFt: floorSizing.effectiveSpanFt,
+          liveLoadPsf: design.floorLiveLoadPsf,
+          deadLoadPsf: design.floorDeadLoadPsf,
+          snowLoadPsf: 0,
+          bearingLengthIn: Math.max(3.5, Math.ceil(girderCheck.requiredBearingIn * 2) / 2),
+          jackStudsEachEnd: girderCheck.jackStudsEachEnd,
+          endReactionLbs: girderCheck.shearLbs,
+        })
+      }
 
       // Batch joist hangers on both sides of the flush girder
       const joistsPerSide = Math.max(2, Math.floor((girderLenFt * 12) / floorSizing.spacingIn))
@@ -431,7 +457,7 @@ export function autopopulateStructuralScene(
         sku: floorSizing.joistHangerSku,
         position: [(gStart[0] + gEnd[0]) / 2, girderY, (gStart[1] + gEnd[1]) / 2],
         quantity: joistsPerSide * 2,
-        attachedNodeIds: [girderId, assemblyId],
+        attachedNodeIds: [firstGirderId, assemblyId],
         name: `${floorSizing.joistHangerSku} Joist Hangers (x${joistsPerSide * 2} along Girder #${g})`,
       })
 
@@ -441,14 +467,13 @@ export function autopopulateStructuralScene(
         sku: beamHangerSku,
         position: [gStart[0], girderY, gStart[1]],
         quantity: 2,
-        attachedNodeIds: [girderId],
+        attachedNodeIds: [firstGirderId],
         name: `${beamHangerSku} Girder End Hangers (x2)`,
       })
 
-      // Intermediate support columns + post caps + post bases + spread footings every <= 12 ft
-      const postBays = Math.max(2, Math.ceil(girderLenFt / 12))
+      // Intermediate support columns + post caps + post bases + spread footings at each bay split
       const colHeightFt = defaultWallHeightM * METERS_TO_FEET
-      const colAxialLbs = Math.round(girderCheck.uniformLoadPlf * (girderLenFt / postBays))
+      const colAxialLbs = Math.round(girderCheck.uniformLoadPlf * baySpanFt)
       const colSizing = sizeColumnAndFooting({
         axialLoadLbs: colAxialLbs,
         unbracedHeightFt: colHeightFt,
@@ -462,6 +487,8 @@ export function autopopulateStructuralScene(
         const px = gStart[0] + (gEnd[0] - gStart[0]) * t
         const pz = gStart[1] + (gEnd[1] - gStart[1]) * t
         const colId = nextId('strcol')
+        const leftBayId = bayGirderIds[p - 1] ?? firstGirderId
+        const rightBayId = bayGirderIds[p]
         createdNodes.push({
           id: colId,
           type: 'structural:column',
@@ -474,7 +501,7 @@ export function autopopulateStructuralScene(
           widthIn: colSizing.entry.widthIn,
           depthIn: colSizing.entry.depthIn,
           axialLoadLbs: colAxialLbs,
-          transfersFromNodeId: girderId,
+          transfersFromNodeId: leftBayId,
           transfersToNodeId: includeFoundation ? `footing:${colId}` : undefined,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? colSizing.footingWidthIn : 0,
@@ -486,7 +513,7 @@ export function autopopulateStructuralScene(
         emitConnector({
           sku: colSizing.recommendedCapSku,
           position: [px, girderY - (girderCheck.entry.depthIn * INCHES_TO_METERS) / 2, pz],
-          attachedNodeIds: [colId, girderId],
+          attachedNodeIds: rightBayId ? [colId, leftBayId, rightBayId] : [colId, leftBayId],
           name: `${colSizing.recommendedCapSku} Post-to-Girder Cap`,
         })
         // Standoff Post Base (only when resting on foundation footing)

@@ -23,7 +23,10 @@ import {
   structuralFirestopParametrics,
 } from './nodes/parametrics'
 import { STRUCTURAL_PLUGIN_ID, structuralRenderPlugin } from './render'
-import { STRUCTURAL_SCHEDULE_VIEW_ID } from './ui/structural-panel'
+import StructuralChatCard from './ui/chat-card'
+import StructuralInspectorCard from './ui/inspector-card'
+import StructuralScheduleView from './ui/schedule-view'
+import StructuralHostPanel, { STRUCTURAL_SCHEDULE_VIEW_ID } from './ui/structural-panel'
 
 export const structuralInspectorExtensions: InspectorExtension[] = [
   {
@@ -38,7 +41,7 @@ export const structuralInspectorExtensions: InspectorExtension[] = [
     ],
     icon: { kind: 'iconify', name: 'lucide:blocks' },
     title: 'IRC / NDS Structural Engineering',
-    component: () => import('./ui/inspector-card'),
+    component: () => Promise.resolve({ default: StructuralInspectorCard }),
   },
 ]
 
@@ -99,7 +102,7 @@ export const structuralHostPanel: EditorHostPanel = {
   },
   pluginUrl: 'https://github.com/kruschdev/pascal-plugin-structural',
   icon: { kind: 'iconify', name: 'lucide:blocks' },
-  component: () => import('./ui/structural-panel'),
+  component: () => Promise.resolve({ default: StructuralHostPanel }),
   defaultInstalled: false,
 }
 
@@ -110,7 +113,7 @@ export const structuralScheduleView: EditorHostView = {
   description:
     'Beams & Headers, Columns & Footings, Simpson-class Connectors & Fasteners, IRC R302.11/R302.12 Fire Blocking, Load Path & Bracing, IRC Audit, and Priced BOM.',
   icon: { kind: 'iconify', name: 'lucide:table' },
-  component: () => import('./ui/schedule-view'),
+  component: () => Promise.resolve({ default: StructuralScheduleView }),
   workspaces: ['edit'],
   defaultPinned: false,
 }
@@ -118,10 +121,10 @@ export const structuralScheduleView: EditorHostView = {
 export const structuralChatExtension: PluginChatExtension = {
   pluginId: STRUCTURAL_PLUGIN_ID,
   cards: {
-    structural_audit_irc: () => import('./ui/chat-card'),
-    structural_trace_load_path: () => import('./ui/chat-card'),
-    structural_generate_schedule: () => import('./ui/chat-card'),
-    structural_autopopulate_irc: () => import('./ui/chat-card'),
+    structural_audit_irc: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_trace_load_path: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_generate_schedule: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_autopopulate_irc: () => Promise.resolve({ default: StructuralChatCard }),
   },
   actions: [
     {
