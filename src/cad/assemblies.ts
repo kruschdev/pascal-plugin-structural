@@ -418,11 +418,11 @@ export function buildFirestopCad(options: FirestopCadOptions): Group {
       addMesh(g, new Mesh(new BoxGeometry(liveW, blockH, liveD), fsMat), 0, plateH + blockH / 2, 0)
     } else {
       addMesh(g, new Mesh(new BoxGeometry(liveW, liveH, liveD), fsMat), 0, liveH / 2, 0)
-      // Subtle red code-compliance inspection band inset along the outer face
-      const stripeH = Math.min(0.012, liveH * 0.25)
+      // High-visibility red IRC R302.11 / R302.12 code-compliance inspection band proud of stud faces
+      const stripeH = Math.min(0.036, Math.max(0.016, liveH * 0.38))
       addMesh(
         g,
-        new Mesh(new BoxGeometry(liveW, stripeH, liveD + 0.001), pool.firestopIntumescentRed),
+        new Mesh(new BoxGeometry(liveW + 0.002, stripeH, liveD + 0.010), pool.firestopIntumescentRed),
         0,
         liveH / 2,
         0,

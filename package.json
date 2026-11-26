@@ -64,6 +64,7 @@
     "test": "bun test src",
     "check:render": "bun scripts/check-render-entry.ts",
     "export:cad": "bun scripts/export-cad-catalog.ts",
+    "render:walkthrough": "bun scripts/render-walkthrough-video.ts",
     "check": "bun run check-types && bun test && bun run check:render && bun run build"
   },
   "peerDependencies": {

@@ -8,7 +8,7 @@ import { openEditorView, useScene, useViewer } from '@pascal-app/editor'
 import { useEffect, useMemo, useState } from 'react'
 import { structuralAgentOperations } from '../agent-operations'
 import { auditStructuralScene } from '../irc/audit'
-import { computeLevelBounds } from '../irc/openings'
+import { computeLevelBounds, extractWallOpenings } from '../irc/openings'
 import {
   type BeamMaterialFamily,
   type ColumnType,
@@ -447,16 +447,137 @@ export default function StructuralHostPanel() {
     const b = computeLevelBounds(record, levelId)
     const cx = (b.minX + b.maxX) / 2
     const cz = (b.minZ + b.maxZ) / 2
-    const offset = ((placeIdx % 5) - 2) * 0.45
+    const idx = placeIdx
     setPlaceIdx((i) => i + 1)
-    const isPoint = kind === 'penetration-firestop'
+
+    const levelWalls = Object.values(record)
+      .filter((n) => n.type === 'wall' && belongsToLevel(record, n, levelId) && Array.isArray(n.start) && Array.isArray(n.end))
+      .map((w) => {
+        const sx = Number(w.start![0])
+        const sz = Number(w.start![1])
+        const ex = Number(w.end![0])
+        const ez = Number(w.end![1])
+        const len = Math.hypot(ex - sx, ez - sz)
+        const h = typeof w.height === 'number' && w.height > 0 ? w.height : b.avgWallHeightM
+        const thick = typeof w.thickness === 'number' && w.thickness > 0 ? w.thickness : 0.14
+        return { wall: w, sx, sz, ex, ez, len, h, thick }
+      })
+      .filter((w) => w.len >= 1.2)
+      .sort((a, bW) => bW.len - a.len)
+
+    // Pick longest unobstructed solid stud-bay interval [u0, u1] on a host wall so fire blocking
+    // seats flush inside framed stud cavities without ever piercing doors or windows.
+    const findWallSegment = (
+      preferIndex: number,
+      maxLenM: number,
+    ): { start: [number, number]; end: [number, number]; wall: typeof levelWalls[number] } | null => {
+      if (levelWalls.length === 0) return null
+      const candidateOrder = [
+        levelWalls[preferIndex % levelWalls.length]!,
+        ...levelWalls.filter((_, i) => i !== preferIndex % levelWalls.length),
+      ]
+      for (const w of candidateOrder) {
+        const openings = extractWallOpenings(record, w.wall)
+          .map((o) => [Math.max(0.18, o.uCenterM - o.widthM / 2 - 0.1), Math.min(w.len - 0.18, o.uCenterM + o.widthM / 2 + 0.1)] as [number, number])
+          .sort((a, c) => a[0] - c[0])
+        const intervals: Array<[number, number]> = []
+        let cursor = 0.22
+        for (const [o0, o1] of openings) {
+          if (o0 - cursor >= 0.8) intervals.push([cursor, o0])
+          cursor = Math.max(cursor, o1)
+        }
+        if (w.len - 0.22 - cursor >= 0.8) intervals.push([cursor, w.len - 0.22])
+        intervals.sort((a, c) => c[1] - c[0] - (a[1] - a[0]))
+        const best = intervals[0]
+        if (!best) continue
+        const span = Math.min(maxLenM, best[1] - best[0])
+        const mid = (best[0] + best[1]) / 2
+        const u0 = mid - span / 2
+        const u1 = mid + span / 2
+        const ux = (w.ex - w.sx) / w.len
+        const uz = (w.ez - w.sz) / w.len
+        return {
+          wall: w,
+          start: [Number((w.sx + ux * u0).toFixed(3)), Number((w.sz + uz * u0).toFixed(3))],
+          end: [Number((w.sx + ux * u1).toFixed(3)), Number((w.sz + uz * u1).toFixed(3))],
+        }
+      }
+      return null
+    }
+
+    let start: [number, number] = [Number((cx - 1.5).toFixed(2)), Number(cz.toFixed(2))]
+    let end: [number, number] = [Number((cx + 1.5).toFixed(2)), Number(cz.toFixed(2))]
+    let elevationY = Number(Math.max(1.2, b.avgWallHeightM * 0.52).toFixed(2))
+    let heightM = 0.089
+    let thicknessM = 0.14
+    let hostWallId: string | undefined
+
+    if (kind === 'wall-vertical-10ft' || kind === 'wall-horizontal-10ft') {
+      const seg = findWallSegment(idx, 3.2)
+      if (seg) {
+        start = seg.start
+        end = seg.end
+        elevationY = Number((seg.wall.h * 0.52).toFixed(2))
+        heightM = 0.089
+        thicknessM = Number(Math.max(0.089, seg.wall.thick).toFixed(3))
+        hostWallId = seg.wall.wall.id
+      }
+    } else if (kind === 'soffit-drop-ceiling') {
+      const seg = findWallSegment(idx + 1, 3.0)
+      if (seg) {
+        start = seg.start
+        end = seg.end
+        elevationY = Number(Math.max(1.8, seg.wall.h - 0.36).toFixed(2))
+        heightM = 0.24
+        thicknessM = Number(Math.max(0.14, seg.wall.thick).toFixed(3))
+        hostWallId = seg.wall.wall.id
+      }
+    } else if (kind === 'chase-chimney-shaft') {
+      // Compact 22"x22" mineral-wool shaft firestop tucked into an interior corner at ceiling plane
+      const chaseX = Number((b.minX + 0.45).toFixed(2))
+      const chaseZ = Number((b.minZ + 0.45).toFixed(2))
+      start = [Number((chaseX - 0.28).toFixed(2)), chaseZ]
+      end = [Number((chaseX + 0.28).toFixed(2)), chaseZ]
+      elevationY = Number(Math.max(2.0, b.avgWallHeightM - 0.28).toFixed(2))
+      heightM = 0.22
+      thicknessM = 0.56
+    } else if (kind === 'penetration-firestop') {
+      const seg = findWallSegment(idx, 0.2)
+      if (seg) {
+        const mx = (seg.start[0] + seg.end[0]) / 2
+        const mz = (seg.start[1] + seg.end[1]) / 2
+        start = [Number((mx - 0.08).toFixed(3)), Number(mz.toFixed(3))]
+        end = [Number((mx + 0.08).toFixed(3)), Number(mz.toFixed(3))]
+        elevationY = Number(Math.max(2.1, seg.wall.h - 0.06).toFixed(2))
+        heightM = 0.08
+        thicknessM = 0.14
+        hostWallId = seg.wall.wall.id
+      } else {
+        start = [Number((cx - 0.08).toFixed(2)), Number(cz.toFixed(2))]
+        end = [Number((cx + 0.08).toFixed(2)), Number(cz.toFixed(2))]
+        elevationY = Number(Math.max(2.1, b.avgWallHeightM - 0.06).toFixed(2))
+        heightM = 0.08
+        thicknessM = 0.14
+      }
+    } else if (kind === 'floor-draftstop') {
+      elevationY = -0.3
+      heightM = 0.3
+      thicknessM = 0.04
+    } else {
+      elevationY = Number(Math.max(1.8, b.avgWallHeightM - 0.3).toFixed(2))
+      heightM = 0.28
+      thicknessM = 0.089
+    }
+
     const outcome = structuralAgentOperations.structural_place_firestop(record, {
       levelId,
       firestopKind: kind,
-      start: [Number((cx - (isPoint ? 0.08 : 1.5)).toFixed(2)), Number((cz + offset).toFixed(2))],
-      end: [Number((cx + (isPoint ? 0.08 : 1.5)).toFixed(2)), Number((cz + offset).toFixed(2))],
-      elevationY: kind === 'floor-draftstop' ? -0.3 : Number(Math.max(2.1, b.avgWallHeightM - 0.1).toFixed(2)),
-      heightM: isPoint ? 0.08 : 0.3,
+      start,
+      end,
+      elevationY,
+      heightM,
+      thicknessM,
+      hostWallId,
     })
     commitCreatedNodes(outcome.createdNodes ?? [], false)
     setStatusMsg(outcome.text)

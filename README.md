@@ -3,19 +3,43 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-amber.svg)](./LICENSE)
 [![Pascal Plugin API v1](https://img.shields.io/badge/Pascal_Plugin_API-v1-38bdf8.svg)](https://github.com/pascalorg/editor)
 [![3D CAD Models](https://img.shields.io/badge/MIT_3D_CAD_Models-62_.glb-10b981.svg)](./docs/CAD-CATALOG.md)
-[![IRC/NDS Tests](https://img.shields.io/badge/Tests-52%2F52_Passing-22c55e.svg)](./src/__tests__)
+[![IRC/NDS Tests](https://img.shields.io/badge/Tests-55%2F55_Passing-22c55e.svg)](./src/__tests__)
 
 An open-source, MIT-licensed **Residential and Light-Commercial IRC / AWC NDS / WFCM / AISC Structural Framing** plugin for [Pascal Editor](https://github.com/pascalorg/editor) (`pluginId: krusch:structural`).
 
 I built this as a standalone external plugin implementing Pascal's full Plugin API v1 and `E-016` agent contracts so it drops cleanly into any Pascal host without requiring upstream core merges. It anchors **Priority #1** in the 4-trade right-of-way hierarchy (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`).
 
-## Live Showcase in Pascal Editor
+## Walkthrough Video (Recorded Live in Pascal Editor)
+
+![Live Pascal Editor Walkthrough: One-Click IRC/NDS Auto-Frame on Craftsman 32x24 House, Live Switch from Stick Rafters to Prefab Fink W-Trusses, Structural Layer Peeling, Quick-Place Steel HSS Column, HDU5 Hold-Down & Firestop, and Split-Pane 7-Tab Engineering Schedule & Priced BOM](./assets/demo-walkthrough.gif)
+
+**[Watch Full 720p HD Walkthrough Video Recorded in Pascal Editor (`assets/demo-walkthrough.mp4`)](./assets/demo-walkthrough.mp4)**
+
+## Showcase Gallery
+
+![4-Panel 3D Structural Assembly Cutaways: Wall Framing & Window Header (IRC R602.7), TJI I-Joist & LVL Girder Floor System (IRC R502), Fink Roof Truss & H2.5A Hurricane Ties (IRC R802.10), and Seismic Braced Shear Wall with Dual HDU5 Hold-Downs & BP3x3 Washers (IRC R602.10)](./assets/demo-structural-cutaways.png)
 
 ![Full-Building 3D Stick-Rafter Structural Framing Skeleton with LVL Ridge Beam, Framing X-Ray Cutaway, and Engineered Headers](./assets/demo-stick-rafter.png)
 
 ![Prefab Fink W-Truss Roof System with Galvanized Steel Gusset Connector Plates, Gable Rake Studs, and Framing X-Ray](./assets/demo-fink-truss.png)
 
 ![Wall Framing Close-Up: Pressure-Treated Mudsills Cut at Doors, Double Top Plates, 3-Stud Corners, King/Jack Studs, Engineered LVL Headers, Double Window Sills, and Bounded Cripples](./assets/demo-walls-headers.png)
+
+![Split-Pane Pascal Editor 3D Framing X-Ray Viewport and Live Populated 7-Tab Structural Engineering Schedule](./assets/demo-structural-schedule.png)
+
+![62 Clean-Room MIT Structural CAD Models (.glb): Built-Up, LSL, LVL, PSL, Glulam, Flitch & Steel W-Beams, TJI I-Joists, Prefab Trusses, Columns & Footings, 47 Simpson-Class Connectors, Fire Blocking & Structural Assembly Cutaways](./assets/cad-material-catalog.png)
+
+### 62-Model Clean-Room MIT CAD Library (7 Categories)
+
+| Category | Count | Included Highlights |
+|---|---|---|
+| **Engineered & Structural Beams** | 10 | `(2) 2x10` & `(3) 2x12` Built-Up Headers/Girders, `1.55E` LSL, 2- & 3-Ply `2.0E` LVL, `2.0E` PSL Parallam, `24F-V4` Glulam, A36 Steel Flitch Beam, A992 `W10x22` & `W12x40` Wide-Flange Steel Beams |
+| **I-Joists & Prefabricated Trusses** | 7 | `TJI-110`, `TJI-230`, `TJI-560` Engineered I-Joists w/ LVL flanges & factory knockouts, 16" Open-Web Parallel-Chord Floor Truss, 24 ft Fink W-Web, Scissor Vaulted, and 28 ft Room-in-Attic Roof Trusses |
+| **Structural Columns & Footings** | 6 | `4x4` DF-L Post, `(3) 2x6` King Post, `5-1/4"` PSL Column, `5-1/2"` Architectural Glulam Column, `3-1/2"` Concrete-Filled Steel Lally, and `HSS 4x4x1/4` Steel Column w/ Spread Pad Footings |
+| **Hurricane Ties & Framing Clips** | 9 | `H1`, `H2.5A`, `H10A`, `HGA10`, `MTS16`, `HTS20` Twisted Uplift Straps, `A35` 3-Way Framing Angle, `LTP4` Lateral Tie Plate, `LS50` Field-Skewable Angle |
+| **Joist & Engineered Beam Hangers** | 7 | `LUS210`, `HUS210`, `LSSU210` Sloped/Skewed Rafter Hanger, `IUS2.56/11.88` & `MIT411.88` I-Joist Hangers, `HGUS5.50/12` Heavy Girder Hanger, `HUCQ410-SDS` Concealed-Flange Hanger |
+| **Post Bases, Caps & Hold-Downs** | 13 | `ABU44Z`, `ABU66Z`, `CB66` Post Bases, `BC4`, `LPC6Z`, `CCQ66` Post Caps, `HDU2`, `HDU5`, `HDU11` Hold-Downs, `STHD14`, `MSTC40` Strap, `BP3x3` Seismic Plate Washer, `SSTB16` Anchor Bolt |
+| **Fire Blocking & Assembly Cutaways** | 10 | `IRC R302.11(1)-(5)` Stud Cavity, Soffit, Mineral-Wool Chase & UL Intumescent Collar Firestops, `R302.12` Floor Draftstop, plus 5 Full Modular Wall/Floor/Roof/Shear-Wall/Foundation Cutaways |
 
 ## Key Capabilities
 
@@ -35,6 +59,8 @@ I built this as a standalone external plugin implementing Pascal's full Plugin A
 | **[IRC / AWC NDS Reference](./docs/IRC-REFERENCE.md)** | Multi-species span tables, NDS ASD beam/column formulas, Simpson-class hardware selection, R302.11/R302.12 fire blocking, and R602.10 bracing |
 | **[62-Model MIT 3D CAD Catalog](./docs/CAD-CATALOG.md)** | Full inventory of all 62 procedural `.glb` structural and hardware models and programmatic `./cad` builders |
 | **[Agent Tools Reference (`E-016`)](./docs/AGENT-TOOLS.md)** | All 9 pure Zod agent tools and headless scene operations for MCP servers, chat workflows, and automation |
+| **[Media Kit & Launch Copy](./docs/MEDIA-KIT.md)** | Ready-to-share social preview (`1280 x 640`), HD walkthrough video, high-res screenshots, 4-panel cutaways, CAD contact sheet, and launch copy |
+| **[Walkthrough Voiceover Script](./docs/WALKTHROUGH-SCRIPT.md)** | Timed 60-second narration beat sheet and one-command Gemini TTS (`gemini-3.8-flash-tts`) + `ffmpeg` muxing script (`scripts/add-voiceover.sh`) |
 
 ## Package Entrypoints
 
@@ -84,8 +110,13 @@ setPluginDiscovery(async () => [structuralRenderPlugin])
 
 ```bash
 bun install
-bun run check          # tsc --noEmit + bun test src (52/52 tests) + 5/5 entry gates + dist/ build + Turbopack chunk gate
-bun run export:cad     # Export all 62 clean-room .glb structural CAD models to assets/cad/
+bun run check          # tsc --noEmit + bun test src (55/55 tests) + 5/5 entry gates + dist/ build + Turbopack chunk gate
+bun run export:cad     # Export all 62 clean-room .glb structural CAD models + catalog.json to assets/cad/
+bun scripts/render-cad-thumbnails.ts     # Re-render all 62 studio thumbnails + 6x11 contact sheet
+bun scripts/render-structural-cutaways.ts # Re-render 4-panel 3D structural assembly cutaways
+PASCAL_EDITOR_URL=http://localhost:3210/project/structural-media-showcase bun run render:walkthrough # Re-render assets/demo-walkthrough.mp4 and .gif
+bun scripts/render-social-preview.ts     # Re-render 1280x640 OpenGraph social preview card
+bash scripts/add-voiceover.sh --voice Charon --replace-main # Synthesize & mux Gemini TTS narration
 ```
 
 > **Engineering Disclaimer**: All IRC/AWC/NDS/AISC calculations, beam selections, connector schedules, fire-blocking audits, and BOM estimates in this plugin are deterministic drafting and pre-engineering aids and never substitute for a licensed Structural Engineer (SE/PE) stamp or local AHJ approval.

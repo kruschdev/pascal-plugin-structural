@@ -1,0 +1,937 @@
+{
+  "version": 1,
+  "license": "MIT",
+  "count": 62,
+  "items": [
+    {
+      "id": "beam-dim-2-2x10",
+      "name": "(2) 2x10 Built-Up Header w/ Spacer",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "IRC R602.7(1)",
+      "description": "2-ply DF-L #2 built-up window/door header with 1/2\" OSB spacer and staggered 16d nailing",
+      "dimensionsMm": [
+        2439,
+        235,
+        95
+      ],
+      "glbBytes": 14328,
+      "modelPath": "./beam-dim-2-2x10.glb",
+      "thumbnailPath": "./thumbs/beam-dim-2-2x10.png"
+    },
+    {
+      "id": "beam-dim-3-2x12",
+      "name": "(3) 2x12 Built-Up Floor Girder",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "IRC R502.5",
+      "description": "3-ply DF-L #2 stitched dimensional girder with visible ply seams and 16d nail schedule",
+      "dimensionsMm": [
+        2439,
+        286,
+        122
+      ],
+      "glbBytes": 15968,
+      "modelPath": "./beam-dim-3-2x12.glb",
+      "thumbnailPath": "./thumbs/beam-dim-3-2x12.png"
+    },
+    {
+      "id": "beam-lsl-3.5x11.875",
+      "name": "3-1/2\"x11-7/8\" 1.55E LSL Header",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AWC NDS / IRC R602.7",
+      "description": "TimberStrand 1.55E laminated strand lumber single-member structural header",
+      "dimensionsMm": [
+        2438,
+        302,
+        90
+      ],
+      "glbBytes": 6152,
+      "modelPath": "./beam-lsl-3.5x11.875.glb",
+      "thumbnailPath": "./thumbs/beam-lsl-3.5x11.875.png"
+    },
+    {
+      "id": "beam-lvl-2-11.875",
+      "name": "(2) 1-3/4\"x11-7/8\" 2.0E LVL",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AWC NDS",
+      "description": "2-ply 2600Fb laminated veneer lumber beam with rotary veneer seams and SDS ply screws",
+      "dimensionsMm": [
+        2439,
+        302,
+        94
+      ],
+      "glbBytes": 12060,
+      "modelPath": "./beam-lvl-2-11.875.glb",
+      "thumbnailPath": "./thumbs/beam-lvl-2-11.875.png"
+    },
+    {
+      "id": "beam-lvl-3-14",
+      "name": "(3) 1-3/4\"x14\" 2.0E LVL Girder",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AWC NDS",
+      "description": "3-ply heavy 14\" LVL floor/ridge girder with stitched structural screw schedule",
+      "dimensionsMm": [
+        2439,
+        356,
+        138
+      ],
+      "glbBytes": 16724,
+      "modelPath": "./beam-lvl-3-14.glb",
+      "thumbnailPath": "./thumbs/beam-lvl-3-14.png"
+    },
+    {
+      "id": "beam-psl-5.25x14",
+      "name": "5-1/4\"x14\" 2.0E PSL Transfer Beam",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AWC NDS",
+      "description": "Parallam 2900Fb monolithic parallel-strand lumber heavy transfer girder",
+      "dimensionsMm": [
+        2439,
+        358,
+        134
+      ],
+      "glbBytes": 6528,
+      "modelPath": "./beam-psl-5.25x14.glb",
+      "thumbnailPath": "./thumbs/beam-psl-5.25x14.png"
+    },
+    {
+      "id": "beam-glulam-5.125x15",
+      "name": "5-1/8\"x15\" 24F-V4 Glulam Beam",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AWC NDS / ANSI A190.1",
+      "description": "Architectural laminated honey-timber 24F-V4 glulam beam with horizontal lam glue-lines",
+      "dimensionsMm": [
+        2439,
+        379,
+        130
+      ],
+      "glbBytes": 34768,
+      "modelPath": "./beam-glulam-5.125x15.glb",
+      "thumbnailPath": "./thumbs/beam-glulam-5.125x15.png"
+    },
+    {
+      "id": "beam-flitch-2x12-500",
+      "name": "(2) 2x12 + 1/2\"x11\" A36 Flitch Beam",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AWC NDS / AISC 360",
+      "description": "Composite wood/steel flitch girder with recessed A36 center plate and staggered 1/2\" through-bolts",
+      "dimensionsMm": [
+        2438,
+        286,
+        121
+      ],
+      "glbBytes": 20116,
+      "modelPath": "./beam-flitch-2x12-500.glb",
+      "thumbnailPath": "./thumbs/beam-flitch-2x12-500.png"
+    },
+    {
+      "id": "beam-steel-w10x22",
+      "name": "W10x22 A992 Structural Steel Beam",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AISC 360",
+      "description": "Red-oxide primed wide-flange W10x22 I-beam with root fillets and end bearing stiffeners",
+      "dimensionsMm": [
+        2438,
+        259,
+        146
+      ],
+      "glbBytes": 10204,
+      "modelPath": "./beam-steel-w10x22.glb",
+      "thumbnailPath": "./thumbs/beam-steel-w10x22.png"
+    },
+    {
+      "id": "beam-steel-w12x40",
+      "name": "W12x40 A992 Heavy Steel Girder",
+      "category": "Engineered & Structural Beams",
+      "codeRef": "AISC 360",
+      "description": "Heavy wide-flange W12x40 long-span transfer girder with full-depth bearing stiffeners",
+      "dimensionsMm": [
+        2438,
+        302,
+        203
+      ],
+      "glbBytes": 10184,
+      "modelPath": "./beam-steel-w12x40.glb",
+      "thumbnailPath": "./thumbs/beam-steel-w12x40.png"
+    },
+    {
+      "id": "ijoist-tji-110-9.5",
+      "name": "TJI-110 9-1/2\" Engineered I-Joist",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R502.1.2",
+      "description": "1-3/4\" LVL flanges with 3/8\" OSB web, stamped circular knockouts, and bearing stiffeners",
+      "dimensionsMm": [
+        3049,
+        241,
+        44
+      ],
+      "glbBytes": 20372,
+      "modelPath": "./ijoist-tji-110-9.5.glb",
+      "thumbnailPath": "./thumbs/ijoist-tji-110-9.5.png"
+    },
+    {
+      "id": "ijoist-tji-230-11.875",
+      "name": "TJI-230 11-7/8\" Engineered I-Joist",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R502.1.2",
+      "description": "2-5/16\" LVL flanges with 3/8\" OSB web and 12\" OC factory knockouts outside support zones",
+      "dimensionsMm": [
+        3049,
+        302,
+        59
+      ],
+      "glbBytes": 20244,
+      "modelPath": "./ijoist-tji-230-11.875.glb",
+      "thumbnailPath": "./thumbs/ijoist-tji-230-11.875.png"
+    },
+    {
+      "id": "ijoist-tji-560-16",
+      "name": "TJI-560 16\" Heavy Engineered I-Joist",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R502.1.2",
+      "description": "3-1/2\" wide LVL flanges with 7/16\" OSB web for long residential spans up to 28.5 ft",
+      "dimensionsMm": [
+        3049,
+        406,
+        89
+      ],
+      "glbBytes": 20028,
+      "modelPath": "./ijoist-tji-560-16.glb",
+      "thumbnailPath": "./thumbs/ijoist-tji-560-16.png"
+    },
+    {
+      "id": "truss-open-web-floor",
+      "name": "16\" Open-Web Parallel-Chord Floor Truss",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R502.11 / TPI 1",
+      "description": "Parallel-chord Warren open-web floor truss with galvanized toothed gang-nail connector plates",
+      "dimensionsMm": [
+        4267,
+        414,
+        96
+      ],
+      "glbBytes": 107992,
+      "modelPath": "./truss-open-web-floor.glb",
+      "thumbnailPath": "./thumbs/truss-open-web-floor.png"
+    },
+    {
+      "id": "truss-fink-roof",
+      "name": "24 ft Fink (W-Web) Pitched Roof Truss",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R802.10 / TPI 1",
+      "description": "6:12 pitched Fink W-web roof truss with raised energy heels, overhangs, and gang-nail plates",
+      "dimensionsMm": [
+        8254,
+        2078,
+        46
+      ],
+      "glbBytes": 94568,
+      "modelPath": "./truss-fink-roof.glb",
+      "thumbnailPath": "./thumbs/truss-fink-roof.png"
+    },
+    {
+      "id": "truss-scissor-roof",
+      "name": "24 ft Scissor Vaulted Roof Truss",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R802.10 / TPI 1",
+      "description": "7:12 top / 3.5:12 vaulted bottom-chord scissor truss with king post and connector plates",
+      "dimensionsMm": [
+        8259,
+        2381,
+        46
+      ],
+      "glbBytes": 115100,
+      "modelPath": "./truss-scissor-roof.glb",
+      "thumbnailPath": "./thumbs/truss-scissor-roof.png"
+    },
+    {
+      "id": "truss-attic-roof",
+      "name": "28 ft Room-in-Attic Habitable Roof Truss",
+      "category": "I-Joists & Prefabricated Trusses",
+      "codeRef": "IRC R802.10 / TPI 1",
+      "description": "9:12 habitable room-in-attic truss with floor-rated bottom chord, knee walls, and collar tie",
+      "dimensionsMm": [
+        9486,
+        3445,
+        46
+      ],
+      "glbBytes": 134072,
+      "modelPath": "./truss-attic-roof.glb",
+      "thumbnailPath": "./thumbs/truss-attic-roof.png"
+    },
+    {
+      "id": "col-4x4-dfl",
+      "name": "4x4 DF-L #2 Solid Wood Post",
+      "category": "Structural Columns & Footings",
+      "codeRef": "IRC R407.3 / R502.9",
+      "description": "Solid 4x4 Douglas Fir-Larch post with ABU44Z 1\"-standoff base and BC4 post cap",
+      "dimensionsMm": [
+        103,
+        2507,
+        92
+      ],
+      "glbBytes": 49916,
+      "modelPath": "./col-4x4-dfl.glb",
+      "thumbnailPath": "./thumbs/col-4x4-dfl.png"
+    },
+    {
+      "id": "col-3-2x6-king",
+      "name": "(3) 2x6 Built-Up King Post",
+      "category": "Structural Columns & Footings",
+      "codeRef": "IRC R602.7",
+      "description": "3-ply stitched 2x6 built-up load-bearing post with ABU66Z standoff base and LPC6Z cap",
+      "dimensionsMm": [
+        154,
+        2519,
+        143
+      ],
+      "glbBytes": 53592,
+      "modelPath": "./col-3-2x6-king.glb",
+      "thumbnailPath": "./thumbs/col-3-2x6-king.png"
+    },
+    {
+      "id": "col-psl-5.25",
+      "name": "5-1/4\"x5-1/4\" 1.8E PSL Column",
+      "category": "Structural Columns & Footings",
+      "codeRef": "AWC NDS",
+      "description": "High-capacity Parallam PSL column with CB66 embedded base and CCQ66 SDS column cap",
+      "dimensionsMm": [
+        186,
+        2557,
+        221
+      ],
+      "glbBytes": 45220,
+      "modelPath": "./col-psl-5.25.glb",
+      "thumbnailPath": "./thumbs/col-psl-5.25.png"
+    },
+    {
+      "id": "col-glulam-5.5",
+      "name": "5-1/2\"x5-1/2\" Architectural Glulam Column",
+      "category": "Structural Columns & Footings",
+      "codeRef": "AWC NDS / IRC R407",
+      "description": "Multi-lamination architectural glulam column with concrete pad footing and CCQ66 cap",
+      "dimensionsMm": [
+        629,
+        2891,
+        629
+      ],
+      "glbBytes": 58116,
+      "modelPath": "./col-glulam-5.5.glb",
+      "thumbnailPath": "./thumbs/col-glulam-5.5.png"
+    },
+    {
+      "id": "col-steel-lally-3.5",
+      "name": "3-1/2\" Concrete-Filled Steel Lally Column",
+      "category": "Structural Columns & Footings",
+      "codeRef": "IRC R407.3 / AISC",
+      "description": "Schedule 40 red-oxide steel pipe filled with concrete, welded cap/base plates, and pad footing",
+      "dimensionsMm": [
+        610,
+        2772,
+        610
+      ],
+      "glbBytes": 22392,
+      "modelPath": "./col-steel-lally-3.5.glb",
+      "thumbnailPath": "./thumbs/col-steel-lally-3.5.png"
+    },
+    {
+      "id": "col-steel-hss-4x4",
+      "name": "HSS 4x4x1/4 Steel Column w/ Pad Footing",
+      "category": "Structural Columns & Footings",
+      "codeRef": "AISC 360",
+      "description": "A500 Gr C square hollow structural steel column with welded bearing plates and concrete footing",
+      "dimensionsMm": [
+        610,
+        2772,
+        610
+      ],
+      "glbBytes": 12308,
+      "modelPath": "./col-steel-hss-4x4.glb",
+      "thumbnailPath": "./thumbs/col-steel-hss-4x4.png"
+    },
+    {
+      "id": "conn-h1",
+      "name": "H1 Gusseted U-Tie Hurricane Clip",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R802.11",
+      "description": "U-shaped rafter/truss-to-top-plate hurricane tie with twin wrap flanges",
+      "dimensionsMm": [
+        89,
+        133,
+        51
+      ],
+      "glbBytes": 16256,
+      "modelPath": "./conn-h1.glb",
+      "thumbnailPath": "./thumbs/conn-h1.png"
+    },
+    {
+      "id": "conn-h25a",
+      "name": "H2.5A Rafter-to-Plate Hurricane Tie",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R802.11",
+      "description": "Standard seismic & coastal asymmetric wrap rafter-to-double-top-plate tie",
+      "dimensionsMm": [
+        37,
+        152,
+        52
+      ],
+      "glbBytes": 14468,
+      "modelPath": "./conn-h25a.glb",
+      "thumbnailPath": "./thumbs/conn-h25a.png"
+    },
+    {
+      "id": "conn-h10a",
+      "name": "H10A High-Uplift Double-Gusset Tie",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R802.11 / WFCM",
+      "description": "Heavy double-sided gusseted hurricane tie rated 1,340 lb uplift for >=130 mph wind",
+      "dimensionsMm": [
+        105,
+        210,
+        57
+      ],
+      "glbBytes": 23648,
+      "modelPath": "./conn-h10a.glb",
+      "thumbnailPath": "./thumbs/conn-h10a.png"
+    },
+    {
+      "id": "conn-hga10",
+      "name": "HGA10 Heavy SDS Gusset Angle",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R802.11 / WFCM",
+      "description": "Heavy 14-ga dual-gusset uplift angle fastened with (8) 1/4\"x3\" SDS hex screws",
+      "dimensionsMm": [
+        83,
+        184,
+        70
+      ],
+      "glbBytes": 12812,
+      "modelPath": "./conn-hga10.glb",
+      "thumbnailPath": "./thumbs/conn-hga10.png"
+    },
+    {
+      "id": "conn-mts16",
+      "name": "MTS16 16\" Twisted Uplift Strap",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R802.11",
+      "description": "16\" galvanized 90-deg helical twist strap tying roof truss directly to wall stud below",
+      "dimensionsMm": [
+        32,
+        406,
+        32
+      ],
+      "glbBytes": 29884,
+      "modelPath": "./conn-mts16.glb",
+      "thumbnailPath": "./thumbs/conn-mts16.png"
+    },
+    {
+      "id": "conn-hts20",
+      "name": "HTS20 20\" Heavy Twisted Uplift Strap",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "WFCM / HVHZ",
+      "description": "20\" heavy-gauge twisted coastal/HVHZ uplift strap rated 1,625 lb uplift",
+      "dimensionsMm": [
+        32,
+        508,
+        32
+      ],
+      "glbBytes": 30648,
+      "modelPath": "./conn-hts20.glb",
+      "thumbnailPath": "./thumbs/conn-hts20.png"
+    },
+    {
+      "id": "conn-a35",
+      "name": "A35 3-Way Shear Framing Angle",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R602.10",
+      "description": "Multi-purpose bent 3-way shear transfer and blocking framing clip",
+      "dimensionsMm": [
+        39,
+        114,
+        40
+      ],
+      "glbBytes": 14364,
+      "modelPath": "./conn-a35.glb",
+      "thumbnailPath": "./thumbs/conn-a35.png"
+    },
+    {
+      "id": "conn-ltp4",
+      "name": "LTP4 Lateral Shear Tie Plate",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R602.10.8",
+      "description": "Stamped galvanized lateral tie plate with stiffening ribs for rim-to-plate shear transfer",
+      "dimensionsMm": [
+        73,
+        114,
+        6
+      ],
+      "glbBytes": 12400,
+      "modelPath": "./conn-ltp4.glb",
+      "thumbnailPath": "./thumbs/conn-ltp4.png"
+    },
+    {
+      "id": "conn-ls50",
+      "name": "LS50 Field-Skewable Framing Angle",
+      "category": "Hurricane Ties & Framing Clips",
+      "codeRef": "IRC R802.3",
+      "description": "0-135 degree field-skewable reinforcing angle for hips, valleys, and gable framing",
+      "dimensionsMm": [
+        59,
+        124,
+        37
+      ],
+      "glbBytes": 12804,
+      "modelPath": "./conn-ls50.glb",
+      "thumbnailPath": "./thumbs/conn-ls50.png"
+    },
+    {
+      "id": "conn-lus210",
+      "name": "LUS210 Double-Shear Face Joist Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "IRC R502.6.2",
+      "description": "Double-shear 2x10/2x12 face-mount joist hanger with slant-nail embossments",
+      "dimensionsMm": [
+        94,
+        200,
+        44
+      ],
+      "glbBytes": 23392,
+      "modelPath": "./conn-lus210.glb",
+      "thumbnailPath": "./thumbs/conn-lus210.png"
+    },
+    {
+      "id": "conn-hus210",
+      "name": "HUS210 Heavy Face-Mount Joist Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "IRC R502.6.2",
+      "description": "Heavy-duty double-shear 2x10/2x12 hanger rated 3,825 lb download",
+      "dimensionsMm": [
+        120,
+        229,
+        76
+      ],
+      "glbBytes": 28604,
+      "modelPath": "./conn-hus210.glb",
+      "thumbnailPath": "./thumbs/conn-hus210.png"
+    },
+    {
+      "id": "conn-lssu210",
+      "name": "LSSU210 Sloped & Skewed Rafter Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "IRC R802.3",
+      "description": "Field-adjustable sloped seat and skewed cheek hanger for hip/valley rafters",
+      "dimensionsMm": [
+        96,
+        254,
+        139
+      ],
+      "glbBytes": 23508,
+      "modelPath": "./conn-lssu210.glb",
+      "thumbnailPath": "./thumbs/conn-lssu210.png"
+    },
+    {
+      "id": "conn-ius-11.88",
+      "name": "IUS2.56/11.88 I-Joist Face Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "IRC R502.1.2",
+      "description": "Full-height face-mount TJI I-joist hanger with snap-in diamond locating tabs",
+      "dimensionsMm": [
+        121,
+        302,
+        51
+      ],
+      "glbBytes": 23324,
+      "modelPath": "./conn-ius-11.88.glb",
+      "thumbnailPath": "./thumbs/conn-ius-11.88.png"
+    },
+    {
+      "id": "conn-mit-11.88",
+      "name": "MIT411.88 Top-Flange I-Joist Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "IRC R502.1.2",
+      "description": "Top-flange engineered I-joist hanger bearing directly over LVL/Glulam girders",
+      "dimensionsMm": [
+        121,
+        306,
+        116
+      ],
+      "glbBytes": 25356,
+      "modelPath": "./conn-mit-11.88.glb",
+      "thumbnailPath": "./thumbs/conn-mit-11.88.png"
+    },
+    {
+      "id": "conn-hgus550-12",
+      "name": "HGUS5.50/12 Extra-Heavy Girder Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "AWC NDS",
+      "description": "12-ga extra-heavy double-shear 3-ply LVL/Glulam girder hanger (10,850 lb download)",
+      "dimensionsMm": [
+        221,
+        298,
+        102
+      ],
+      "glbBytes": 28408,
+      "modelPath": "./conn-hgus550-12.glb",
+      "thumbnailPath": "./thumbs/conn-hgus550-12.png"
+    },
+    {
+      "id": "conn-hucq410-sds",
+      "name": "HUCQ410-SDS Concealed-Flange Hanger",
+      "category": "Joist & Engineered Beam Hangers",
+      "codeRef": "AWC NDS",
+      "description": "Concealed inward-flange architectural beam hanger fastened with 1/4\" SDS screws",
+      "dimensionsMm": [
+        109,
+        229,
+        89
+      ],
+      "glbBytes": 15388,
+      "modelPath": "./conn-hucq410-sds.glb",
+      "thumbnailPath": "./thumbs/conn-hucq410-sds.png"
+    },
+    {
+      "id": "conn-abu44z",
+      "name": "ABU44Z 4x4 1\"-Standoff Post Base",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R407.3 / R317.1",
+      "description": "Adjustable 4x4 galvanized post base with 1\" moisture-standoff platform and anchor bolt",
+      "dimensionsMm": [
+        103,
+        140,
+        92
+      ],
+      "glbBytes": 25684,
+      "modelPath": "./conn-abu44z.glb",
+      "thumbnailPath": "./thumbs/conn-abu44z.png"
+    },
+    {
+      "id": "conn-abu66z",
+      "name": "ABU66Z 6x6 1\"-Standoff Post Base",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R407.3 / R317.1",
+      "description": "Adjustable 6x6 moisture-standoff post base rated 10,945 lb download",
+      "dimensionsMm": [
+        154,
+        159,
+        143
+      ],
+      "glbBytes": 25672,
+      "modelPath": "./conn-abu66z.glb",
+      "thumbnailPath": "./thumbs/conn-abu66z.png"
+    },
+    {
+      "id": "conn-cb66",
+      "name": "CB66 Embedded Heavy 6x6 Column Base",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R407.3",
+      "description": "Cast-in-place heavy embedded 6x6 column base with concrete anchor legs and machine bolts",
+      "dimensionsMm": [
+        186,
+        216,
+        146
+      ],
+      "glbBytes": 19668,
+      "modelPath": "./conn-cb66.glb",
+      "thumbnailPath": "./thumbs/conn-cb66.png"
+    },
+    {
+      "id": "conn-bc4",
+      "name": "BC4 4x4 Stamped Post-to-Beam Cap",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R502.9",
+      "description": "Stamped 18-ga U-saddle post cap tying 4x girder directly to 4x4 post",
+      "dimensionsMm": [
+        103,
+        140,
+        92
+      ],
+      "glbBytes": 22620,
+      "modelPath": "./conn-bc4.glb",
+      "thumbnailPath": "./thumbs/conn-bc4.png"
+    },
+    {
+      "id": "conn-lpc6z",
+      "name": "LPC6Z 6x Adjustable Retrofit Post Cap",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R502.9",
+      "description": "Two-piece adjustable L-cap pair for 5-1/4\" to 6x beams over 6x6 posts",
+      "dimensionsMm": [
+        154,
+        165,
+        131
+      ],
+      "glbBytes": 14836,
+      "modelPath": "./conn-lpc6z.glb",
+      "thumbnailPath": "./thumbs/conn-lpc6z.png"
+    },
+    {
+      "id": "conn-ccq66",
+      "name": "CCQ66 Heavy Welded SDS Column Cap",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "AWC NDS",
+      "description": "7-ga welded heavy steel T-column cap with 1/4\" SDS screws (34,200 lb download)",
+      "dimensionsMm": [
+        167,
+        241,
+        221
+      ],
+      "glbBytes": 21868,
+      "modelPath": "./conn-ccq66.glb",
+      "thumbnailPath": "./thumbs/conn-ccq66.png"
+    },
+    {
+      "id": "conn-hdu2",
+      "name": "HDU2-SDS2.5 Light Overturning Hold-Down",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R602.10.6.2",
+      "description": "Gusseted bucket hold-down with 6 SDS screws, bearing block, and 5/8\" anchor rod (3,075 lb)",
+      "dimensionsMm": [
+        76,
+        224,
+        83
+      ],
+      "glbBytes": 22636,
+      "modelPath": "./conn-hdu2.glb",
+      "thumbnailPath": "./thumbs/conn-hdu2.png"
+    },
+    {
+      "id": "conn-hdu5",
+      "name": "HDU5-SDS2.5 Seismic Shear-Wall Hold-Down",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R602.10 / SDC D0-D2",
+      "description": "Standard SDC D0-D2 gusseted hold-down with 14 SDS screws and anchor rod (5,645 lb)",
+      "dimensionsMm": [
+        76,
+        336,
+        83
+      ],
+      "glbBytes": 22564,
+      "modelPath": "./conn-hdu5.glb",
+      "thumbnailPath": "./thumbs/conn-hdu5.png"
+    },
+    {
+      "id": "conn-hdu11",
+      "name": "HDU11-SDS2.5 Extra-Heavy Hold-Down",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "Engineered Shear Wall",
+      "description": "Extra-heavy multi-storey overturning hold-down with 30 SDS screws and 1\" rod (11,175 lb)",
+      "dimensionsMm": [
+        76,
+        568,
+        89
+      ],
+      "glbBytes": 23896,
+      "modelPath": "./conn-hdu11.glb",
+      "thumbnailPath": "./thumbs/conn-hdu11.png"
+    },
+    {
+      "id": "conn-sthd14",
+      "name": "STHD14 Embedded Stemwall Strap Hold-Down",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R602.10.6.4",
+      "description": "Cast-in-place stemwall strap-tie hold-down for braced corners and portal frames",
+      "dimensionsMm": [
+        74,
+        559,
+        21
+      ],
+      "glbBytes": 12204,
+      "modelPath": "./conn-sthd14.glb",
+      "thumbnailPath": "./thumbs/conn-sthd14.png"
+    },
+    {
+      "id": "conn-mstc40",
+      "name": "MSTC40 40\" Heavy Continuous Tension Strap",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "WFCM / SDC D0-D2",
+      "description": "40\" wide 16-ga perforated continuous load-path multi-storey tension strap (4,185 lb)",
+      "dimensionsMm": [
+        76,
+        1016,
+        5
+      ],
+      "glbBytes": 13668,
+      "modelPath": "./conn-mstc40.glb",
+      "thumbnailPath": "./thumbs/conn-mstc40.png"
+    },
+    {
+      "id": "conn-bp3x3",
+      "name": "BP3x3 3\"x3\"x0.229\" Seismic Plate Washer",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R602.11.1",
+      "description": "Mandatory IRC R602.11.1 heavy square seismic bearing plate washer with hex nut",
+      "dimensionsMm": [
+        76,
+        38,
+        76
+      ],
+      "glbBytes": 10380,
+      "modelPath": "./conn-bp3x3.glb",
+      "thumbnailPath": "./thumbs/conn-bp3x3.png"
+    },
+    {
+      "id": "conn-sstb16",
+      "name": "SSTB16 5/8\"x17-5/8\" Cast-in-Place Anchor Bolt",
+      "category": "Post Bases, Caps & Hold-Downs",
+      "codeRef": "IRC R403.1.6",
+      "description": "High-capacity cast-in-place hold-down anchor bolt with forged T-head, washer, and hex nut",
+      "dimensionsMm": [
+        54,
+        448,
+        44
+      ],
+      "glbBytes": 37488,
+      "modelPath": "./conn-sstb16.glb",
+      "thumbnailPath": "./thumbs/conn-sstb16.png"
+    },
+    {
+      "id": "firestop-wall-cavity",
+      "name": "IRC R302.11(2) Stud Cavity Fire Blocking",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R302.11(2)",
+      "description": "Horizontal 2x fire-blocking board sealing concealed vertical stud cavity at <=10 ft intervals",
+      "dimensionsMm": [
+        445,
+        1050,
+        142
+      ],
+      "glbBytes": 7732,
+      "modelPath": "./firestop-wall-cavity.glb",
+      "thumbnailPath": "./thumbs/firestop-wall-cavity.png"
+    },
+    {
+      "id": "firestop-soffit-drop",
+      "name": "IRC R302.11(1) Soffit / Drop-Ceiling Fire Blocking",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R302.11(1)",
+      "description": "23/32\" OSB fire-blocking diaphragm isolating concealed wall-to-soffit interconnection",
+      "dimensionsMm": [
+        445,
+        1100,
+        709
+      ],
+      "glbBytes": 16752,
+      "modelPath": "./firestop-soffit-drop.glb",
+      "thumbnailPath": "./thumbs/firestop-soffit-drop.png"
+    },
+    {
+      "id": "firestop-chase-wool",
+      "name": "IRC R302.11(4) Chase Mineral-Wool Firestop",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R302.11(4)",
+      "description": "Floor-plane mechanical/chimney chase packed with mineral wool batt and galvanized collar",
+      "dimensionsMm": [
+        596,
+        475,
+        596
+      ],
+      "glbBytes": 22416,
+      "modelPath": "./firestop-chase-wool.glb",
+      "thumbnailPath": "./thumbs/firestop-chase-wool.png"
+    },
+    {
+      "id": "firestop-intumescent-collar",
+      "name": "IRC R302.11(5) Intumescent Firestop Collar",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R302.11(5)",
+      "description": "UL-listed red steel-jacketed intumescent firestop collar around pipe passing double top plate",
+      "dimensionsMm": [
+        560,
+        420,
+        140
+      ],
+      "glbBytes": 34288,
+      "modelPath": "./firestop-intumescent-collar.glb",
+      "thumbnailPath": "./thumbs/firestop-intumescent-collar.png"
+    },
+    {
+      "id": "firestop-floor-draftstop",
+      "name": "IRC R302.12 Open-Web Floor Draftstop",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R302.12",
+      "description": "1/2\" Type X gypsum board draftstop membrane dividing concealed floor-ceiling cavity (<=1,000 sf)",
+      "dimensionsMm": [
+        1200,
+        356,
+        648
+      ],
+      "glbBytes": 11588,
+      "modelPath": "./firestop-floor-draftstop.glb",
+      "thumbnailPath": "./thumbs/firestop-floor-draftstop.png"
+    },
+    {
+      "id": "assembly-wall-framing",
+      "name": "IRC Exterior Wall Framing & Window Header Cutaway",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R602.3 / R602.7",
+      "description": "8 ft x 8 ft 2x6 wall framing cutaway with PT sill, double 2x10 header, jacks, kings, and fire blocking",
+      "dimensionsMm": [
+        2438,
+        2438,
+        140
+      ],
+      "glbBytes": 48904,
+      "modelPath": "./assembly-wall-framing.glb",
+      "thumbnailPath": "./thumbs/assembly-wall-framing.png"
+    },
+    {
+      "id": "assembly-floor-system",
+      "name": "TJI I-Joist & LVL Girder Floor System Cutaway",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R502.1.2 / R502.6",
+      "description": "2-ply LVL carrying girder, TJI-230 I-joists on IUS hangers, rim board, and partial OSB subfloor",
+      "dimensionsMm": [
+        2401,
+        323,
+        1935
+      ],
+      "glbBytes": 216460,
+      "modelPath": "./assembly-floor-system.glb",
+      "thumbnailPath": "./thumbs/assembly-floor-system.png"
+    },
+    {
+      "id": "assembly-roof-system",
+      "name": "Fink Roof Truss & Hurricane-Tie Cutaway",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R802.10 / R802.11",
+      "description": "Double top plates, 24\" OC Fink trusses, H2.5A hurricane ties at heels, and partial OSB roof deck",
+      "dimensionsMm": [
+        4339,
+        1276,
+        1619
+      ],
+      "glbBytes": 374296,
+      "modelPath": "./assembly-roof-system.glb",
+      "thumbnailPath": "./thumbs/assembly-roof-system.png"
+    },
+    {
+      "id": "assembly-braced-wall-line",
+      "name": "IRC R602.10 Seismic Braced Shear Wall Cutaway",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R602.10 / R602.11",
+      "description": "48\" braced wall panel on stemwall with dual HDU5 hold-downs, BP3x3 plate washers, and OSB sheathing",
+      "dimensionsMm": [
+        1519,
+        2658,
+        200
+      ],
+      "glbBytes": 91396,
+      "modelPath": "./assembly-braced-wall-line.glb",
+      "thumbnailPath": "./thumbs/assembly-braced-wall-line.png"
+    },
+    {
+      "id": "assembly-foundation-system",
+      "name": "Foundation Stemwall, Pad Footing & Post-Base Cutaway",
+      "category": "Fire Blocking & Assembly Cutaways",
+      "codeRef": "IRC R403 / R407.3",
+      "description": "Continuous strip footing, stemwall, PT sill w/ BP3x3 washers, interior pad footing, ABU66Z, and girder",
+      "dimensionsMm": [
+        2400,
+        1585,
+        1590
+      ],
+      "glbBytes": 103280,
+      "modelPath": "./assembly-foundation-system.glb",
+      "thumbnailPath": "./thumbs/assembly-foundation-system.png"
+    }
+  ]
+}
