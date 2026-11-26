@@ -1006,7 +1006,7 @@ export function auditStructuralScene(
                 px <= bounds.maxX + 0.1 &&
                 pz >= bounds.minZ - 0.1 &&
                 pz <= bounds.maxZ + 0.1
-              if (!insideXZ || py <= baseY + wallH + 0.05) continue
+              if (!insideXZ || py + halfY <= baseY + wallH + 0.05) continue
               const roofY = evalAuditRoofSurfaceY(
                 px,
                 pz,

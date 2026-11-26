@@ -191,9 +191,10 @@ describe('Structural Audit & 3D Visual QA Regression Suite (STR-BUG-01..04, STR-
       },
     }
     const lp = traceStructuralLoadPaths({ nodes: scene })
-    const end2Link = lp.gravityLinks.find((l) => l.fromNodeId === 'bm_girder' && l.position[0] === 6)!
-    expect(end2Link.continuous).toBe(false)
-    expect(end2Link.toType).toBe('unverified-support')
+    const end2Link = lp.gravityLinks.find((l) => l.fromNodeId === 'bm_girder' && Math.abs(l.position[0] - 6) < 1e-6)
+    expect(end2Link).toBeDefined()
+    expect(end2Link?.continuous).toBe(false)
+    expect(end2Link?.toType).toBe('unverified-support')
 
     // Autopopulate on an L-shaped floor with an interior post standing ON TOP of the floor at the open girder end (18, 0, 7)
     // MUST STILL emit the required below-floor girder end-support post!
@@ -627,5 +628,146 @@ describe('Structural Audit & 3D Visual QA Regression Suite (STR-BUG-01..04, STR-
     }
     const twoStoryAudit = auditStructuralScene(twoStory)
     expect(twoStoryAudit.findings.some((f) => f.nodeId === 'bad_duct_roof')).toBe(false)
+  })
+
+  test('R2-STR-01: waived <4 ft interior nib wall cannot chain as prevPassing across a >60 ft BWL span', () => {
+    // True passing perimeter BWLs sit 22m (> 60 ft / 18.29m maxBwlSpacingM) apart at z=0 and z=22.
+    // A short <4.0 ft (0.9m) interior nib wall at z=10 gets waived, followed by a failing 6m interior
+    // partition wall at z=14. Distance from nib (10) to north (22) is 12m <= 18.29m, but the nib wall
+    // was NOT originally passing so the 6m partition MUST NOT chain off it and MUST remain failing.
+    const wideScene: Record<string, SceneNodeLike> = {
+      lvl1: { id: 'lvl1', type: 'level', height: 2.7432 },
+      w_south: {
+        id: 'w_south',
+        type: 'wall',
+        parentId: 'lvl1',
+        start: [0, 0],
+        end: [10, 0],
+        height: 2.7432,
+        frontSide: 'exterior',
+      },
+      w_nib: {
+        id: 'w_nib',
+        type: 'wall',
+        parentId: 'lvl1',
+        start: [2, 10],
+        end: [2.9, 10],
+        height: 2.7432,
+        frontSide: 'interior',
+        backSide: 'interior',
+      },
+      w_part: {
+        id: 'w_part',
+        type: 'wall',
+        parentId: 'lvl1',
+        start: [0, 14],
+        end: [6, 14],
+        height: 2.7432,
+        frontSide: 'interior',
+        backSide: 'interior',
+      },
+      d_part: {
+        id: 'd_part',
+        type: 'door',
+        parentId: 'w_part',
+        width: 5.5,
+        height: 2.13,
+        position: [3, 0, 0],
+      },
+      w_north: {
+        id: 'w_north',
+        type: 'wall',
+        parentId: 'lvl1',
+        start: [0, 22],
+        end: [10, 22],
+        height: 2.7432,
+        frontSide: 'exterior',
+      },
+    }
+
+    const bwls = evaluateBracedWallLines({ nodes: wideScene, levelId: 'lvl1' })
+    const nibBwl = bwls.find((b) => b.wallIds.includes('w_nib'))
+    const partBwl = bwls.find((b) => b.wallIds.includes('w_part'))
+    const southBwl = bwls.find((b) => b.wallIds.includes('w_south'))
+    const northBwl = bwls.find((b) => b.wallIds.includes('w_north'))
+
+    expect(southBwl?.passes).toBe(true)
+    expect(northBwl?.passes).toBe(true)
+    expect(nibBwl).toBeDefined()
+    expect(nibBwl?.passes).toBe(true)
+    expect(partBwl).toBeDefined()
+    expect(partBwl?.passes).toBe(false)
+  })
+
+  test('R2-STR-02: 3-story upper columns wire transfersToNodeId to story 1 (not story 0), and large eave-protruding duct with centerline <= wallH + 0.05 is flagged', () => {
+    // Part A: 3-story L-shaped building where story 0 columns are inserted BEFORE story 1 columns
+    const makeL = (lvlId: string, prefix: string): Record<string, SceneNodeLike> => ({
+      [`${prefix}_s`]: { id: `${prefix}_s`, type: 'wall', parentId: lvlId, start: [0, 0], end: [18, 0], height: 2.7432 },
+      [`${prefix}_el`]: { id: `${prefix}_el`, type: 'wall', parentId: lvlId, start: [18, 0], end: [18, 5], height: 2.7432 },
+      [`${prefix}_sh`]: { id: `${prefix}_sh`, type: 'wall', parentId: lvlId, start: [18, 5], end: [9, 5], height: 2.7432 },
+      [`${prefix}_sv`]: { id: `${prefix}_sv`, type: 'wall', parentId: lvlId, start: [9, 5], end: [9, 14], height: 2.7432 },
+      [`${prefix}_nw`]: { id: `${prefix}_nw`, type: 'wall', parentId: lvlId, start: [9, 14], end: [0, 14], height: 2.7432 },
+      [`${prefix}_w`]: { id: `${prefix}_w`, type: 'wall', parentId: lvlId, start: [0, 14], end: [0, 0], height: 2.7432 },
+    })
+
+    const threeStoryL: Record<string, SceneNodeLike> = {
+      bldg: { id: 'bldg', type: 'building' },
+      lvl0: { id: 'lvl0', type: 'level', parentId: 'bldg', level: 0, height: 2.7432 },
+      lvl1: { id: 'lvl1', type: 'level', parentId: 'bldg', level: 1, height: 2.7432 },
+      lvl2: { id: 'lvl2', type: 'level', parentId: 'bldg', level: 2, height: 2.7432 },
+      ...makeL('lvl0', 'w0'),
+      ...makeL('lvl1', 'w1'),
+      ...makeL('lvl2', 'w2'),
+    }
+
+    const r0 = autopopulateStructuralScene(threeStoryL, { levelId: 'lvl0', floorSystem: 'tji-ijoist', includeFoundation: true })
+    const afterL0 = mergeCreated(threeStoryL, r0.createdNodes)
+    const l0ColIds = new Set(r0.createdNodes.filter((n) => n.type === 'structural:column').map((n) => n.id))
+    expect(l0ColIds.size).toBeGreaterThanOrEqual(2)
+
+    const r1 = autopopulateStructuralScene(afterL0, { levelId: 'lvl1', floorSystem: 'tji-ijoist', includeFoundation: false })
+    const afterL1 = mergeCreated(afterL0, r1.createdNodes)
+    const l1ColIds = new Set(r1.createdNodes.filter((n) => n.type === 'structural:column').map((n) => n.id))
+    expect(l1ColIds.size).toBeGreaterThanOrEqual(2)
+
+    const r2 = autopopulateStructuralScene(afterL1, { levelId: 'lvl2', floorSystem: 'tji-ijoist', includeFoundation: false })
+    const l2GirderCols = r2.createdNodes.filter(
+      (n) => n.type === 'structural:column' && typeof n.name === 'string' && n.name.includes('Girder'),
+    )
+    expect(l2GirderCols.length).toBeGreaterThanOrEqual(2)
+    for (const col of l2GirderCols) {
+      expect(typeof col.transfersToNodeId).toBe('string')
+      expect(l1ColIds.has(col.transfersToNodeId as string)).toBe(true)
+      expect(l0ColIds.has(col.transfersToNodeId as string)).toBe(false)
+    }
+
+    // Part B: Large 24"-tall duct with centerline py=2.74 <= wallH+0.05 (2.79m) near eave (z=0.1, roofY=2.79m)
+    // Top is 2.74 + 0.3048 = 3.0448m > roofY + 0.15 (2.94m) -> MUST be flagged as an error!
+    const eaveDuctHouse: Record<string, SceneNodeLike> = {
+      bldg: { id: 'bldg', type: 'building' },
+      lvl1: { id: 'lvl1', type: 'level', parentId: 'bldg', level: 0, height: 2.74 },
+      w1: { id: 'w1', type: 'wall', parentId: 'lvl1', start: [0, 0], end: [10, 0], height: 2.74 },
+      w2: { id: 'w2', type: 'wall', parentId: 'lvl1', start: [10, 0], end: [10, 8], height: 2.74 },
+      w3: { id: 'w3', type: 'wall', parentId: 'lvl1', start: [10, 8], end: [0, 8], height: 2.74 },
+      w4: { id: 'w4', type: 'wall', parentId: 'lvl1', start: [0, 8], end: [0, 0], height: 2.74 },
+      large_eave_duct: {
+        id: 'large_eave_duct',
+        type: 'hvac:duct-run',
+        parentId: 'lvl1',
+        name: 'Oversized Trunk Near Eave',
+        shape: 'rectangular',
+        width: 24,
+        height: 24,
+        path: [
+          [2, 2.74, 0.1],
+          [8, 2.74, 0.1],
+        ],
+      },
+    }
+
+    const eaveAudit = auditStructuralScene(eaveDuctHouse)
+    const eaveFinding = eaveAudit.findings.find((f) => f.nodeId === 'large_eave_duct' && f.category === 'mep-clash')
+    expect(eaveFinding).toBeDefined()
+    expect(eaveFinding?.severity).toBe('error')
   })
 })

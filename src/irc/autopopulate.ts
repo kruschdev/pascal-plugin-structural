@@ -128,24 +128,47 @@ export function autopopulateStructuralScene(
         ? currentLevelNode.parentId
         : null
 
-    return Object.values(nodes).find((n) => {
-      if (n.type !== 'structural:column') return false
-      if (levelId && belongsToLevel(nodes, n, levelId)) return false
+    const candidates: Array<{ node: SceneNodeLike; levelOrder: number; dist: number; y: number }> = []
+    for (const n of Object.values(nodes)) {
+      if (n.type !== 'structural:column') continue
+      if (levelId && belongsToLevel(nodes, n, levelId)) continue
       const nLvlId = resolveNodeLevelId(nodes, n)
       const nLvlNode = nLvlId ? nodes[nLvlId] : undefined
       if (targetBuildingId && nLvlNode?.type === 'level') {
         const nBuildingId = typeof nLvlNode.parentId === 'string' ? nLvlNode.parentId : null
-        if (nBuildingId && nBuildingId !== targetBuildingId) return false
+        if (nBuildingId && nBuildingId !== targetBuildingId) continue
       }
       const p = n.position ?? [0, 0, 0]
-      if (Math.hypot(p[0] - px, p[2] - pz) > 0.45) return false
+      const dist = Math.hypot(p[0] - px, p[2] - pz)
+      if (dist > 0.45) continue
+
+      let candidateOrder = Number.NEGATIVE_INFINITY
       if (currentLevelOrder !== null && nLvlNode?.type === 'level') {
         const nOrder = levelSortOrder(nLvlNode)
-        if (nOrder > currentLevelOrder) return false
-        if (nOrder < currentLevelOrder) return true
+        if (nOrder > currentLevelOrder) continue
+        if (nOrder < currentLevelOrder) {
+          candidateOrder = nOrder
+        } else if (p[1] < colBottomY - 0.1) {
+          candidateOrder = nOrder
+        } else {
+          continue
+        }
+      } else if (p[1] < colBottomY - 0.1) {
+        candidateOrder = nLvlNode?.type === 'level' ? levelSortOrder(nLvlNode) : Number.NEGATIVE_INFINITY
+      } else {
+        continue
       }
-      return p[1] < colBottomY - 0.1
+
+      candidates.push({ node: n, levelOrder: candidateOrder, dist, y: p[1] })
+    }
+
+    if (candidates.length === 0) return undefined
+    candidates.sort((a, b) => {
+      if (b.levelOrder !== a.levelOrder) return b.levelOrder - a.levelOrder
+      if (a.dist !== b.dist) return a.dist - b.dist
+      return b.y - a.y
     })
+    return candidates[0]!.node
   }
 
   const createdNodes: SceneNodeLike[] = []

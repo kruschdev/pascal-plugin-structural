@@ -354,15 +354,25 @@ export function evaluateBracedWallLines(params: {
       const overlapsProj = (a: { minProj: number; maxProj: number }, b: { minProj: number; maxProj: number }) =>
         Math.min(a.maxProj, b.maxProj) - Math.max(a.minProj, b.minProj) > 0.1
       if (axisReports.length >= 3) {
+        const originallyPassing = axisReports.map((a) => a.report.passes)
         for (let i = 1; i < axisReports.length - 1; i++) {
           const item = axisReports[i]!
           const rep = item.report
           if (rep.passes || item.hasExteriorWall) continue
-          const prevPassing = axisReports
-            .slice(0, i)
-            .reverse()
-            .find((r) => r.report.passes && overlapsProj(r, item))
-          const nextPassing = axisReports.slice(i + 1).find((r) => r.report.passes && overlapsProj(r, item))
+          let prevPassing: (typeof axisReports)[number] | undefined
+          for (let j = i - 1; j >= 0; j--) {
+            if (originallyPassing[j] && overlapsProj(axisReports[j]!, item)) {
+              prevPassing = axisReports[j]!
+              break
+            }
+          }
+          let nextPassing: (typeof axisReports)[number] | undefined
+          for (let j = i + 1; j < axisReports.length; j++) {
+            if (originallyPassing[j] && overlapsProj(axisReports[j]!, item)) {
+              nextPassing = axisReports[j]!
+              break
+            }
+          }
           if (!prevPassing || !nextPassing) continue
           const withinSpacing = Math.abs(nextPassing.report.offsetM - prevPassing.report.offsetM) <= maxBwlSpacingM
           if (withinSpacing || rep.totalLineLengthFt < 4.0) {
