@@ -112,12 +112,18 @@ export function extractWallOpenings(
 
     const widthM = Math.max(0.45, Math.min(wallLenM - 0.15, rawW))
     const pos = Array.isArray(o.position) ? (o.position as number[]) : undefined
+    const rot = Array.isArray(o.rotation) ? (o.rotation as number[]) : [0, 0, 0]
+    const itemRotY = typeof rot[1] === 'number' && Number.isFinite(rot[1]) ? rot[1] : 0
+    const assetOffset = Array.isArray(asset?.offset) ? (asset.offset as number[]) : undefined
     let uCenterM = wallLenM / 2
     if (pos && typeof pos[0] === 'number' && Number.isFinite(pos[0])) {
       const px = pos[0]
       const pz = typeof pos[2] === 'number' && Number.isFinite(pos[2]) ? pos[2] : 0
       if (Math.abs(pz) < 0.45 && px >= -0.25 && px <= wallLenM + 0.25) {
         uCenterM = px
+        if (o.type === 'item' && assetOffset && typeof assetOffset[0] === 'number') {
+          uCenterM += assetOffset[0] * Math.cos(itemRotY)
+        }
       } else {
         const ux = (ex - sx) / wallLenM
         const uz = (ez - sz) / wallLenM
@@ -127,10 +133,24 @@ export function extractWallOpenings(
     uCenterM = Math.max(widthM / 2 + 0.08, Math.min(wallLenM - widthM / 2 - 0.08, uCenterM))
 
     const rawPosY = pos && typeof pos[1] === 'number' && Number.isFinite(pos[1]) ? pos[1] : 0
+    const rawHeightClamped = Math.max(0.45, Math.min(wallHeightM - 0.18, rawH))
+    // Native Pascal `window` stores center height in position[1]; legacy `item` stores base Y
     const sillYM =
       kind === 'door'
         ? 0
-        : Math.max(0.05, Math.min(wallHeightM - 0.5, rawPosY > 0.02 ? rawPosY : 0.9144))
+        : o.type === 'window'
+          ? Math.max(
+              0.08,
+              Math.min(
+                wallHeightM - rawHeightClamped - 0.12,
+                typeof o.sillHeight === 'number'
+                  ? o.sillHeight
+                  : rawPosY > 0.05
+                    ? rawPosY - rawHeightClamped / 2
+                    : 0.9144,
+              ),
+            )
+          : Math.max(0.08, Math.min(wallHeightM - 0.5, rawPosY > 0.02 ? rawPosY : 0.9144))
     const heightM = Math.max(0.45, Math.min(wallHeightM - sillYM - 0.12, rawH))
     const headYM = Math.min(wallHeightM - 0.1, sillYM + heightM)
 

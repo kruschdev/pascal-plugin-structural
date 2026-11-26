@@ -1,17 +1,21 @@
 /**
  * Full-Building 3D IRC/AWC/NDS Structural Framing Skeleton Generator.
  *
- * Builds an InstancedMesh-batched 3D framing skeleton for an entire Pascal level:
- * - Every wall: PT bottom mudsill (door-interrupted), double top plates, studs @ 12"/16"/24" OC,
- *   3-stud corners, framed openings (king studs, jack studs, engineered LVL/Glulam headers,
- *   double sills, upper & lower cripples), and R302.11(2) 10 ft horizontal fire blocking.
+ * Uses exact point-to-point 3D basis orientation (`pushStrut`) and Pascal's
+ * ground-truth coordinate conventions for walls, openings, slabs, and `roof-segment`s:
+ * - Every wall: PT bottom mudsill (cut at doors), double top plates, studs @ 12"/16"/24" OC,
+ *   3-stud corners, framed openings (king studs, jack studs, amber LVL/Glulam headers,
+ *   double window sills, upper & lower cripples — zero studs piercing glass!), and
+ *   R302.11(2) 10 ft horizontal fire blocking.
  * - Floor system: perimeter rim boards + dimensional joists, TJI I-joists (LVL flanges + OSB web),
- *   or open-web floor trusses (chords + angled webs + galvanized plates).
- * - Roof system: stick rafters + structural ridge beam + ceiling joists + collar ties + gable studs,
- *   OR prefab Fink / Scissor / Attic trusses with galvanized truss connector plates.
- * - Foundation: continuous strip footings & stem walls below walls.
+ *   or Warren open-web floor trusses (chords + true diagonal zigzag webs + galvanized plates).
+ * - Roof system: exact Pascal `roof-segment` extraction (ridge along local X `width`, slopes along
+ *   `±Z` `depth/2`, pitch in degrees, downhill-only overhang, zero X-cross at peak) for Stick Rafters
+ *   (with LVL ridge beam, ceiling joists, collar ties, gable rake studs) OR airtight Fink / Scissor /
+ *   Attic trusses with galvanized steel peak, web & heel gusset connector plates.
+ * - Foundation: continuous concrete strip footings & stem walls seated cleanly BELOW floor framing.
  * - Distributed 3D Simpson-class hardware: hurricane ties at every rafter/truss seat, framing angles
- *   at corners, SSTB16 anchor bolts + BP3x3 plate washers every 6 ft along mudsills, and HDU hold-downs.
+ *   at corners, SSTB16 anchor bolts + BP3x3 seismic plate washers @ 6 ft OC along mudsills, and HDU hold-downs.
  *
  * Render-safe & framework-free: Three.js + pure `./irc/*` math only (zero React or `@pascal-app/editor`).
  */
@@ -48,14 +52,10 @@ type BucketId =
 
 type MemberBox = {
   bucket: BucketId
-  /** World-space center [x, y, z] in meters. */
   center: readonly [number, number, number]
-  /** Box dimensions [sx, sy, sz] in meters (local axes before rotation). */
   size: readonly [number, number, number]
-  /** Euler XYZ rotation in radians. */
+  quat?: Quaternion
   rotY?: number
-  rotZ?: number
-  rotX?: number
 }
 
 const SPECIES_LUMBER_HEX: Record<LumberSpecies, number> = {
@@ -95,6 +95,139 @@ function worldOnWall(
   nOff = 0,
 ): [number, number, number] {
   return [sx + ux * u + nx * nOff, y, sz + uz * u + nz * nOff]
+}
+
+/**
+ * Exact right-handed basis quaternion for a structural member running from `pA` to `pB`,
+ * with local +X along `(pB - pA)`, local +Z aligned to `sideHint` (member thickness),
+ * and local +Y perpendicular to both (in-plane member depth).
+ */
+function strutQuaternion(
+  pA: readonly [number, number, number],
+  pB: readonly [number, number, number],
+  sideHint: readonly [number, number, number],
+): { center: [number, number, number]; length: number; quat: Quaternion } | null {
+  const dx = pB[0] - pA[0]
+  const dy = pB[1] - pA[1]
+  const dz = pB[2] - pA[2]
+  const length = Math.hypot(dx, dy, dz)
+  if (length < 0.008) return null
+
+  const xAxis = new Vector3(dx / length, dy / length, dz / length)
+  const hint = new Vector3(sideHint[0], sideHint[1], sideHint[2])
+  // Orthogonalize sideHint against xAxis -> zAxis
+  const dot = hint.dot(xAxis)
+  const zAxis = hint.clone().addScaledVector(xAxis, -dot)
+  if (zAxis.lengthSq() < 1e-6) {
+    zAxis.set(0, 0, 1).addScaledVector(xAxis, -xAxis.z)
+    if (zAxis.lengthSq() < 1e-6) zAxis.set(1, 0, 0)
+  }
+  zAxis.normalize()
+  // Right-hand rule: x × y = z  =>  y = z × x
+  const yAxis = new Vector3().crossVectors(zAxis, xAxis).normalize()
+  const basis = new Matrix4().makeBasis(xAxis, yAxis, zAxis)
+  const quat = new Quaternion().setFromRotationMatrix(basis)
+  return {
+    center: [(pA[0] + pB[0]) / 2, (pA[1] + pB[1]) / 2, (pA[2] + pB[2]) / 2],
+    length,
+    quat,
+  }
+}
+
+type ExtractedRoofSegment = {
+  cx: number
+  cy: number
+  cz: number
+  yaw: number
+  roofType: string
+  /** Local X dimension (ridge length for gable/hip). */
+  widthM: number
+  /** Local Z dimension (eave-to-eave span across slopes). */
+  depthM: number
+  pitchRad: number
+  overhangM: number
+  wallHeightM: number
+}
+
+function extractLevelRoofSegments(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null,
+  defaultWallHeightM: number,
+): ExtractedRoofSegment[] {
+  const out: ExtractedRoofSegment[] = []
+
+  for (const node of Object.values(nodes)) {
+    if (node.type !== 'roof-segment' || node.visible === false) continue
+
+    const segPos = Array.isArray(node.position) ? (node.position as number[]) : [0, 0, 0]
+    let px = typeof segPos[0] === 'number' ? segPos[0] : 0
+    let py = typeof segPos[1] === 'number' ? segPos[1] : 0
+    let pz = typeof segPos[2] === 'number' ? segPos[2] : 0
+    let yaw = typeof node.rotation === 'number' ? node.rotation : 0
+
+    let curParentId = typeof node.parentId === 'string' ? node.parentId : null
+    let belongsHere = false
+    for (let hop = 0; hop < 6 && curParentId; hop++) {
+      if (!levelId || curParentId === levelId) {
+        belongsHere = true
+        break
+      }
+      const parent = nodes[curParentId]
+      if (!parent) break
+      if (parent.type === 'level') {
+        // Also allow a wall-less upper roof level sitting directly above this level
+        const upperHasWalls = Object.values(nodes).some(
+          (w) => w.type === 'wall' && belongsToStructuralLevel(nodes, w, parent.id),
+        )
+        belongsHere = !upperHasWalls
+        break
+      }
+      if (parent.type === 'roof') {
+        const rot = typeof parent.rotation === 'number' ? parent.rotation : 0
+        const rp = Array.isArray(parent.position) ? (parent.position as number[]) : [0, 0, 0]
+        const cos = Math.cos(rot)
+        const sin = Math.sin(rot)
+        const nx = px * cos + pz * sin
+        const nz = -px * sin + pz * cos
+        px = nx + (typeof rp[0] === 'number' ? rp[0] : 0)
+        py += typeof rp[1] === 'number' ? rp[1] : 0
+        pz = nz + (typeof rp[2] === 'number' ? rp[2] : 0)
+        yaw += rot
+      }
+      curParentId = typeof parent.parentId === 'string' ? parent.parentId : null
+    }
+    if (!belongsHere) continue
+
+    const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
+    const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
+    const rawPitch = typeof node.pitch === 'number' && Number.isFinite(node.pitch) ? node.pitch : 26.57
+    // Pascal roof-segment stores pitch in DEGREES (e.g. 26.57 for 6:12); handle radians if <= 1.4
+    const pitchRad =
+      rawPitch <= 0
+        ? 0
+        : rawPitch > 1.4
+          ? (Math.min(65, rawPitch) * Math.PI) / 180
+          : Math.min((65 * Math.PI) / 180, rawPitch)
+    const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
+    const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
+    // Seat roof eaves right on top of the level's double top plates
+    const cy = py > 1.2 ? py + segWallH : defaultWallHeightM
+
+    out.push({
+      cx: px,
+      cy,
+      cz: pz,
+      yaw,
+      roofType: typeof node.roofType === 'string' ? node.roofType : 'gable',
+      widthM,
+      depthM,
+      pitchRad,
+      overhangM,
+      wallHeightM: segWallH,
+    })
+  }
+
+  return out
 }
 
 export type BuildingSkeletonOptions = {
@@ -138,7 +271,9 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
   const allLevelNodes = Object.values(nodes).filter((n) => belongsToStructuralLevel(nodes, n, levelId))
   const walls = allLevelNodes.filter((n) => n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end))
-  const slabs = allLevelNodes.filter((n) => n.type === 'slab' && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3)
+  const slabs = allLevelNodes.filter(
+    (n) => n.type === 'slab' && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3,
+  )
   const levelNode = levelId ? nodes[levelId] : undefined
   const defaultWallHeightM =
     typeof levelNode?.height === 'number' && levelNode.height > 1.5
@@ -146,10 +281,28 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       : typeof assembly.wallHeightM === 'number' && assembly.wallHeightM > 1.5
         ? assembly.wallHeightM
         : 2.55
+  const jDepthM = joistDepthIn * INCHES_TO_METERS
 
   const boxes: MemberBox[] = []
 
-  // Helper to push a box aligned to a wall (rotY = -atan2(uz, ux))
+  const pushStrut = (
+    bucket: BucketId,
+    pA: readonly [number, number, number],
+    pB: readonly [number, number, number],
+    depthM: number,
+    thickM: number,
+    sideHint: readonly [number, number, number],
+  ) => {
+    const res = strutQuaternion(pA, pB, sideHint)
+    if (!res) return
+    boxes.push({
+      bucket,
+      center: res.center,
+      size: [res.length, depthM, thickM],
+      quat: res.quat,
+    })
+  }
+
   const pushWallBox = (
     bucket: BucketId,
     sx: number,
@@ -178,6 +331,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   // ============================================================================
   // 1. WALL FRAMING + FRAMED OPENINGS + FOUNDATION + DISTRIBUTED WALL HARDWARE
   // ============================================================================
+  const fdnTopOffset = showFloor ? jDepthM + 0.02 : 0.02
   for (const wall of walls) {
     const rawOv = wallOverrides[wall.id]
     const ov = typeof rawOv === 'string' ? { construction: rawOv } : rawOv
@@ -213,12 +367,13 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         : defaultSpacingIn
     const spacingM = spacingIn * INCHES_TO_METERS
 
-    // Foundation stem wall + continuous strip footing beneath wall
+    // Foundation stem wall + continuous strip footing seated cleanly BELOW floor framing
     if (showFoundation) {
-      // Stem wall (8" wide x 12" deep below slab)
-      pushWallBox('concrete', sx, sz, ux, uz, nx, nz, rotY, wallLenM / 2, baseY - 0.16, wallLenM + 0.18, 0.30, 0.20)
-      // Continuous strip footing (18" wide x 8" thick)
-      pushWallBox('concrete', sx, sz, ux, uz, nx, nz, rotY, wallLenM / 2, baseY - 0.41, wallLenM + 0.42, 0.20, 0.46)
+      const stemTopY = baseY - fdnTopOffset
+      const stemH = 0.28
+      const ftgH = 0.20
+      pushWallBox('concrete', sx, sz, ux, uz, nx, nz, rotY, wallLenM / 2, stemTopY - stemH / 2, wallLenM + 0.16, stemH, 0.20)
+      pushWallBox('concrete', sx, sz, ux, uz, nx, nz, rotY, wallLenM / 2, stemTopY - stemH - ftgH / 2, wallLenM + 0.40, ftgH, 0.44)
     }
 
     if (!showWalls) continue
@@ -257,16 +412,14 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
       // Distributed SSTB16 anchor bolts + BP3x3 plate washers @ 6 ft OC along PT mudsill
       if (showConnectors && segLen >= 0.35) {
-        const boltSpacing = 1.8288 // 6 ft per IRC R403.1.6
+        const boltSpacing = 1.8288
         const bolts = Math.max(2, Math.floor(segLen / boltSpacing) + 1)
         for (let bi = 0; bi < bolts; bi++) {
           const uBolt =
             bolts === 1
               ? (s0 + s1) / 2
               : s0 + 0.18 + ((segLen - 0.36) * bi) / Math.max(1, bolts - 1)
-          // BP3x3 3"x3"x1/4" galvanized plate washer
           pushWallBox('galv-steel', sx, sz, ux, uz, nx, nz, rotY, uBolt, baseY + PLATE_THICK_M + 0.005, 0.076, 0.01, 0.076)
-          // Anchor bolt nut & threaded stem
           pushWallBox('galv-steel', sx, sz, ux, uz, nx, nz, rotY, uBolt, baseY + PLATE_THICK_M + 0.025, 0.024, 0.036, 0.024)
         }
       }
@@ -284,16 +437,14 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     if (showConnectors) {
       for (const uCorner of [0.11, wallLenM - 0.11]) {
         if (uCorner > 0.05 && uCorner < wallLenM - 0.05) {
-          // HDU hold-down bracket at stud base
           pushWallBox('holddown-steel', sx, sz, ux, uz, nx, nz, rotY, uCorner, studBaseY + 0.18, 0.07, 0.34, studDepthM + 0.014)
-          // A35 / LTP4 corner framing angle at double top plate
           pushWallBox('galv-steel', sx, sz, ux, uz, nx, nz, rotY, uCorner, baseY + wallH - PLATE_THICK_M, 0.095, 0.09, studDepthM + 0.016)
         }
       }
     }
 
-    // Build rough opening exclusions + frame EVERY door & window with kings, jacks, LVL header, sill & cripples
-    const openExclusions: Array<{ u0: number; u1: number; sillY: number; headerTopY: number; kind: 'door' | 'window' }> = []
+    // Frame EVERY door & window with kings, jacks, engineered LVL header, double sill & cripples
+    const openExclusions: Array<{ u0: number; u1: number; uInner0: number; uInner1: number; sillY: number; headerTopY: number; kind: 'door' | 'window' }> = []
     for (const op of openings) {
       const halfW = op.widthM / 2
       const uLeft = Math.max(STUD_THICK_M * 3, op.uCenterM - halfW)
@@ -307,7 +458,6 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       const actualHeaderH = Math.max(0.11, headerTopY - headerBotY)
       const jackH = Math.max(0.2, headerBotY - studBaseY)
 
-      // Jack (trimmer) studs supporting header at left & right jambs
       for (let j = 0; j < jacksEachEnd; j++) {
         const uJackL = uLeft - STUD_THICK_M * (j + 0.5)
         const uJackR = uRight + STUD_THICK_M * (j + 0.5)
@@ -315,23 +465,19 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uJackR, studBaseY + jackH / 2, STUD_THICK_M, jackH, studDepthM)
       }
 
-      // Full-height king studs flanking the jacks
       const uKingL = uLeft - STUD_THICK_M * (jacksEachEnd + 0.5)
       const uKingR = uRight + STUD_THICK_M * (jacksEachEnd + 0.5)
       pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uKingL, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
       pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, uKingR, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
 
-      // Engineered LVL / Glulam / built-up header spanning jack-to-jack
       const headerSpanM = uRight - uLeft + STUD_THICK_M * jacksEachEnd * 2
       pushWallBox('header-lvl', sx, sz, ux, uz, nx, nz, rotY, (uLeft + uRight) / 2, headerBotY + actualHeaderH / 2, headerSpanM, actualHeaderH, studDepthM + 0.004)
 
-      // Header end-hanger / framing clips on wide headers (> 4 ft)
       if (showConnectors && op.widthM >= 1.2) {
         pushWallBox('galv-steel', sx, sz, ux, uz, nx, nz, rotY, uLeft, headerBotY + actualHeaderH * 0.4, 0.055, actualHeaderH * 0.75, studDepthM + 0.016)
         pushWallBox('galv-steel', sx, sz, ux, uz, nx, nz, rotY, uRight, headerBotY + actualHeaderH * 0.4, 0.055, actualHeaderH * 0.75, studDepthM + 0.016)
       }
 
-      // Double rough sill plate under windows
       const sillY = baseY + op.sillYM
       if (op.kind === 'window' && sillY > studBaseY + PLATE_THICK_M * 2) {
         pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, (uLeft + uRight) / 2, sillY - PLATE_THICK_M * 0.5, uRight - uLeft, PLATE_THICK_M, studDepthM)
@@ -341,27 +487,27 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       openExclusions.push({
         u0: uKingL - STUD_THICK_M,
         u1: uKingR + STUD_THICK_M,
+        uInner0: uLeft + STUD_THICK_M * 0.6,
+        uInner1: uRight - STUD_THICK_M * 0.6,
         sillY,
         headerTopY,
         kind: op.kind,
       })
     }
 
-    // Field common studs @ OC + upper/lower cripples aligned to the exact OC grid
+    // Field common studs @ OC + strictly bounded upper/lower cripples (NEVER inside opening glass!)
     for (let u = spacingM; u < wallLenM - STUD_THICK_M * 2.5; u += spacingM) {
       const hitOp = openExclusions.find((op) => u >= op.u0 && u <= op.u1)
       if (!hitOp) {
         pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, studBaseY + fullStudH / 2, STUD_THICK_M, fullStudH, studDepthM)
-      } else {
-        // Upper cripple above header
+      } else if (u >= hitOp.uInner0 && u <= hitOp.uInner1) {
         const upperH = doubleTopBottomY - hitOp.headerTopY
-        if (upperH > 0.06) {
+        if (upperH > 0.05) {
           pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, hitOp.headerTopY + upperH / 2, STUD_THICK_M, upperH, studDepthM)
         }
-        // Lower cripple below window sill
         if (hitOp.kind === 'window') {
           const lowerH = hitOp.sillY - PLATE_THICK_M * 2 - studBaseY
-          if (lowerH > 0.06) {
+          if (lowerH > 0.05) {
             pushWallBox('lumber', sx, sz, ux, uz, nx, nz, rotY, u, studBaseY + lowerH / 2, STUD_THICK_M, lowerH, studDepthM)
           }
         }
@@ -381,7 +527,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   }
 
   // ============================================================================
-  // 2. FLOOR FRAMING SYSTEM (TJI I-JOISTS / OPEN-WEB TRUSSES / DIMENSIONAL)
+  // 2. FLOOR FRAMING SYSTEM (TJI I-JOISTS / WARREN OPEN-WEB TRUSSES / DIMENSIONAL)
   // ============================================================================
   if (showFloor) {
     const floorRegions: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; topY: number }> = []
@@ -399,7 +545,9 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       }
       if (Number.isFinite(minX) && maxX - minX > 0.5 && maxZ - minZ > 0.5) {
         const elev = typeof slab.elevation === 'number' ? slab.elevation : 0
-        floorRegions.push({ minX, maxX, minZ, maxZ, topY: elev - 0.02 })
+        const slabThick = typeof slab.thickness === 'number' && slab.thickness > 0 ? slab.thickness : 0.05
+        // Seat floor joists strictly below the slab soffit so plates/flanges never z-fight through finished flooring
+        floorRegions.push({ minX, maxX, minZ, maxZ, topY: elev - slabThick - 0.015 })
       }
     }
     if (floorRegions.length === 0 && walls.length >= 2) {
@@ -409,8 +557,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       }
     }
 
-    const jDepthM = joistDepthIn * INCHES_TO_METERS
-    const joistSpacingM = 16 * INCHES_TO_METERS // 0.4064 m
+    const joistSpacingM = 16 * INCHES_TO_METERS
 
     for (const reg of floorRegions) {
       const spanX = reg.maxX - reg.minX
@@ -424,13 +571,13 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       boxes.push({ bucket: 'osb-web', center: [reg.minX + rimThick / 2, jCenterY, (reg.minZ + reg.maxZ) / 2], size: [rimThick, jDepthM, spanZ] })
       boxes.push({ bucket: 'osb-web', center: [reg.maxX - rimThick / 2, jCenterY, (reg.minZ + reg.maxZ) / 2], size: [rimThick, jDepthM, spanZ] })
 
-      // Span joists across the shorter axis
       const spanAlongX = spanX <= spanZ
       const runStart = spanAlongX ? reg.minZ + joistSpacingM : reg.minX + joistSpacingM
       const runEnd = spanAlongX ? reg.maxZ - 0.08 : reg.maxX - 0.08
       const joistLen = Math.max(0.4, (spanAlongX ? spanX : spanZ) - rimThick * 2)
       const joistMid = spanAlongX ? (reg.minX + reg.maxX) / 2 : (reg.minZ + reg.maxZ) / 2
       const rotY = spanAlongX ? 0 : Math.PI / 2
+      const sideHint: [number, number, number] = spanAlongX ? [0, 0, 1] : [1, 0, 0]
 
       for (let pos = runStart; pos <= runEnd; pos += joistSpacingM) {
         const cx = spanAlongX ? joistMid : pos
@@ -438,32 +585,36 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
         if (floorSystem === 'tji-ijoist') {
           const flangeH = 0.0381
-          const flangeW = 0.0635 // 2-1/2" LVL flange
+          const flangeW = 0.0635
           const webH = Math.max(0.08, jDepthM - flangeH * 2)
-          // Top & bottom LVL flanges + OSB web
           boxes.push({ bucket: 'header-lvl', center: [cx, reg.topY - flangeH / 2, cz], size: [joistLen, flangeH, flangeW], rotY })
           boxes.push({ bucket: 'header-lvl', center: [cx, reg.topY - jDepthM + flangeH / 2, cz], size: [joistLen, flangeH, flangeW], rotY })
           boxes.push({ bucket: 'osb-web', center: [cx, jCenterY, cz], size: [joistLen, webH, 0.011], rotY })
         } else if (floorSystem === 'open-web-truss') {
           const chordH = 0.0381
-          const chordW = 0.0889 // 2x4 flat chord
-          boxes.push({ bucket: 'lumber', center: [cx, reg.topY - chordH / 2, cz], size: [joistLen, chordH, chordW], rotY })
-          boxes.push({ bucket: 'lumber', center: [cx, reg.topY - jDepthM + chordH / 2, cz], size: [joistLen, chordH, chordW], rotY })
-          // Vertical web posts + galvanized connector plates along truss
-          const bays = Math.max(3, Math.min(10, Math.round(joistLen / 0.65)))
-          for (let bi = 1; bi < bays; bi++) {
-            const offset = -joistLen / 2 + (joistLen * bi) / bays
-            const wx = spanAlongX ? cx + offset : cx
-            const wz = spanAlongX ? cz : cz + offset
-            boxes.push({ bucket: 'lumber', center: [wx, jCenterY, wz], size: [0.038, jDepthM - chordH * 2, 0.065], rotY })
-            boxes.push({ bucket: 'galv-steel', center: [wx, reg.topY - chordH, wz], size: [0.075, 0.05, chordW + 0.008], rotY })
+          const chordW = 0.0889
+          const topChordY = reg.topY - chordH / 2
+          const botChordY = reg.topY - jDepthM + chordH / 2
+          boxes.push({ bucket: 'lumber', center: [cx, topChordY, cz], size: [joistLen, chordH, chordW], rotY })
+          boxes.push({ bucket: 'lumber', center: [cx, botChordY, cz], size: [joistLen, chordH, chordW], rotY })
+          // True Warren zigzag diagonal webbing joining top & bottom chords cleanly
+          const bays = Math.max(4, Math.min(12, Math.round(joistLen / 0.55)))
+          for (let bi = 0; bi < bays; bi++) {
+            const u0 = -joistLen / 2 + (joistLen * bi) / bays
+            const u1 = -joistLen / 2 + (joistLen * (bi + 1)) / bays
+            const y0 = bi % 2 === 0 ? botChordY : topChordY
+            const y1 = bi % 2 === 0 ? topChordY : botChordY
+            const p0: [number, number, number] = spanAlongX ? [cx + u0, y0, cz] : [cx, y0, cz + u0]
+            const p1: [number, number, number] = spanAlongX ? [cx + u1, y1, cz] : [cx, y1, cz + u1]
+            pushStrut('lumber', p0, p1, 0.038, 0.065, sideHint)
+            if (bi > 0) {
+              boxes.push({ bucket: 'galv-steel', center: p0, size: [0.065, 0.045, chordW + 0.008], rotY })
+            }
           }
         } else {
-          // Solid sawn dimensional joists
           boxes.push({ bucket: 'lumber', center: [cx, jCenterY, cz], size: [joistLen, jDepthM, 0.0381], rotY })
         }
 
-        // Joist hangers at both rim ends
         if (showConnectors) {
           const endOffset = joistLen / 2 - 0.02
           for (const dir of [-1, 1]) {
@@ -477,149 +628,168 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   }
 
   // ============================================================================
-  // 3. ROOF FRAMING SYSTEM (STICK RAFTERS / RIDGE BEAM OR PREFAB TRUSSES + TIES)
+  // 3. ROOF FRAMING SYSTEM (EXACT PASCAL `roof-segment` AXES + POINT-TO-POINT TRUSSES)
   // ============================================================================
   if (showRoof) {
-    // Include roofs on this level, plus roofs sitting directly on an upper wall-less roof level
-    const allRoofs = Object.values(nodes).filter((n) => n.type === 'roof')
-    const roofs = allRoofs.filter((r) => {
-      if (belongsToStructuralLevel(nodes, r, levelId)) return true
-      const rLevelId = typeof r.parentId === 'string' ? r.parentId : null
-      if (!rLevelId) return false
-      const parentHasWalls = Object.values(nodes).some(
-        (w) => w.type === 'wall' && belongsToStructuralLevel(nodes, w, rLevelId),
-      )
-      return !parentHasWalls
-    })
-    const roofTargets: Array<{
-      cx: number
-      cz: number
-      baseY: number
-      lengthM: number
-      leftWidthM: number
-      rightWidthM: number
-      riseM: number
-      rotY: number
-    }> = []
+    let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM)
 
-    for (const r of roofs) {
-      const pos = Array.isArray(r.position) ? (r.position as number[]) : null
-      if (!pos) continue
-      const lenM = typeof r.length === 'number' && r.length > 0.5 ? r.length : 5.5
-      const leftWidthM = typeof r.leftWidth === 'number' && r.leftWidth > 0.3 ? r.leftWidth : 3.0
-      const rightWidthM = typeof r.rightWidth === 'number' && r.rightWidth > 0.3 ? r.rightWidth : leftWidthM
-      const avgHalf = (leftWidthM + rightWidthM) / 2
-      const riseM = typeof r.height === 'number' && r.height > 0.3 ? r.height : avgHalf * 0.45
-      const rotY = typeof r.rotation === 'number' ? r.rotation : 0
-      const roofBaseY = typeof pos[1] === 'number' && pos[1] > 1.5 ? pos[1] : defaultWallHeightM
-      roofTargets.push({ cx: pos[0]!, cz: pos[2]!, baseY: roofBaseY, lengthM: lenM, leftWidthM, rightWidthM, riseM, rotY })
-    }
-
-    // If no explicit roof node exists on this level, frame a roof over the main slab/wall envelope
-    if (roofTargets.length === 0 && walls.length >= 2) {
+    // Fallback when no roof-segment exists yet: synthesize gable roof matching wall footprint
+    if (roofSegments.length === 0 && walls.length >= 2) {
       const b = computeLevelBounds(nodes, levelId)
       const spanX = b.maxX - b.minX
       const spanZ = b.maxZ - b.minZ
       if (spanX > 1.5 && spanZ > 1.5) {
         const ridgeAlongX = spanX >= spanZ
-        const halfSpanM = (ridgeAlongX ? spanZ : spanX) / 2
-        roofTargets.push({
-          cx: (b.minX + b.maxX) / 2,
-          cz: (b.minZ + b.maxZ) / 2,
-          baseY: b.avgWallHeightM,
-          lengthM: ridgeAlongX ? spanX : spanZ,
-          leftWidthM: halfSpanM,
-          rightWidthM: halfSpanM,
-          riseM: Math.max(0.9, halfSpanM * (6 / 12)),
-          rotY: ridgeAlongX ? Math.PI / 2 : 0,
-        })
+        roofSegments = [
+          {
+            cx: (b.minX + b.maxX) / 2,
+            cy: b.avgWallHeightM,
+            cz: (b.minZ + b.maxZ) / 2,
+            yaw: ridgeAlongX ? 0 : Math.PI / 2,
+            roofType: 'gable',
+            widthM: ridgeAlongX ? spanX : spanZ,
+            depthM: ridgeAlongX ? spanZ : spanX,
+            pitchRad: Math.atan(6 / 12),
+            overhangM: 0.4,
+            wallHeightM: 0,
+          },
+        ]
       }
     }
 
     const isTruss =
       roofSystem === 'fink-truss' || roofSystem === 'scissor-truss' || roofSystem === 'attic-truss'
     const rafterSpacingM = (isTruss ? 24 : 16) * INCHES_TO_METERS
-    const rafterDepthM = (isTruss ? 5.5 : 7.25) * INCHES_TO_METERS
+    const chordDepthM = (isTruss ? 5.5 : 7.25) * INCHES_TO_METERS
+    const memberThickM = 0.0381
 
-    for (const rt of roofTargets) {
-      const cosR = Math.cos(rt.rotY)
-      const sinR = Math.sin(rt.rotY)
-      // Local ridge runs along Z; left slope runs along -X, right slope along +X
+    for (const seg of roofSegments) {
+      if (seg.widthM < 0.3 || seg.depthM < 0.3) continue
+      const cosR = Math.cos(seg.yaw)
+      const sinR = Math.sin(seg.yaw)
+      // Pascal roof-segment local frame: +X = ridge direction (width), ±Z = slopes (depth)
+      // Three.js Ry(yaw): (lx, ly, lz) -> (lx*cos + lz*sin, ly, -lx*sin + lz*cos)
       const toWorld = (lx: number, ly: number, lz: number): [number, number, number] => [
-        rt.cx + lx * cosR + lz * sinR,
-        rt.baseY + ly,
-        rt.cz - lx * sinR + lz * cosR,
+        seg.cx + lx * cosR + lz * sinR,
+        seg.cy + ly,
+        seg.cz - lx * sinR + lz * cosR,
       ]
+      const ridgeAxisWorld: [number, number, number] = [cosR, 0, -sinR]
+      const slopeTan = Math.tan(seg.pitchRad)
 
-      const leftAngle = Math.atan2(rt.riseM, rt.leftWidthM)
-      const rightAngle = Math.atan2(rt.riseM, rt.rightWidthM)
-      const leftSlopeLen = Math.hypot(rt.leftWidthM, rt.riseM) + 0.30
-      const rightSlopeLen = Math.hypot(rt.rightWidthM, rt.riseM) + 0.30
-      const totalSpanM = rt.leftWidthM + rt.rightWidthM
-      const spanMidX = (rt.rightWidthM - rt.leftWidthM) / 2
+      if (seg.roofType === 'shed') {
+        // Single sloping plane from -depth/2 (high wall) down to +depth/2 (low eave)
+        const riseM = seg.depthM * slopeTan
+        const count = Math.max(2, Math.floor(seg.widthM / rafterSpacingM) + 1)
+        for (let i = 0; i < count; i++) {
+          const lx = -seg.widthM / 2 + (seg.widthM * i) / Math.max(1, count - 1)
+          const pHigh = toWorld(lx, riseM + seg.overhangM * slopeTan, -seg.depthM / 2 - seg.overhangM)
+          const pLow = toWorld(lx, -seg.overhangM * slopeTan, seg.depthM / 2 + seg.overhangM)
+          pushStrut('lumber', pHigh, pLow, chordDepthM, memberThickM, ridgeAxisWorld)
+          if (showConnectors) {
+            boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM, -seg.depthM / 2 + 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
+            boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, seg.depthM / 2 - 0.04), size: [0.056, 0.14, 0.06], rotY: seg.yaw })
+          }
+        }
+        continue
+      }
+
+      // Gable / Hip: ridge along local X (widthM) at lz = 0; slopes face -Z and +Z (halfRun = depthM / 2)
+      const halfRun = seg.depthM / 2
+      const riseM = Math.max(0.25, halfRun * slopeTan)
+      const ridgeHalfThick = isTruss ? 0 : 0.0445 // rafters butt cleanly against ridge beam face
+      const eaveDropY = seg.overhangM * slopeTan
 
       // Structural LVL / Glulam Ridge Beam (for stick rafters & cathedral)
       if (!isTruss) {
         boxes.push({
           bucket: 'header-lvl',
-          center: toWorld(0, rt.riseM - 0.08, 0),
-          size: [0.089, 0.24, rt.lengthM],
-          rotY: rt.rotY,
+          center: toWorld(0, riseM - 0.09, 0),
+          size: [seg.widthM, 0.24, 0.089],
+          rotY: seg.yaw,
         })
       }
 
-      const count = Math.max(2, Math.floor(rt.lengthM / rafterSpacingM) + 1)
+      const count = Math.max(2, Math.floor(seg.widthM / rafterSpacingM) + 1)
       for (let i = 0; i < count; i++) {
-        const lz = -rt.lengthM / 2 + (rt.lengthM * i) / Math.max(1, count - 1)
-        const midY = rt.riseM / 2
+        const lx = -seg.widthM / 2 + (seg.widthM * i) / Math.max(1, count - 1)
 
-        // Exact asymmetric left & right sloped rafters / top truss chords
-        boxes.push({
-          bucket: 'lumber',
-          center: toWorld(-rt.leftWidthM / 2, midY, lz),
-          size: [leftSlopeLen, rafterDepthM, 0.0381],
-          rotY: rt.rotY,
-          rotZ: leftAngle,
-        })
-        boxes.push({
-          bucket: 'lumber',
-          center: toWorld(rt.rightWidthM / 2, midY, lz),
-          size: [rightSlopeLen, rafterDepthM, 0.0381],
-          rotY: rt.rotY,
-          rotZ: -rightAngle,
-        })
+        // Exact peak & eave overhang endpoints (overhang extends ONLY downhill — zero X-cross at ridge!)
+        const pPeakN = toWorld(lx, riseM, -ridgeHalfThick)
+        const pPeakS = toWorld(lx, riseM, ridgeHalfThick)
+        const pEaveN = toWorld(lx, -eaveDropY, -(halfRun + seg.overhangM))
+        const pEaveS = toWorld(lx, -eaveDropY, halfRun + seg.overhangM)
+        const pWallN = toWorld(lx, 0.06, -halfRun)
+        const pWallS = toWorld(lx, 0.06, halfRun)
 
-        // Ceiling joist / bottom chord (except cathedral ridge)
+        // North (-Z) and South (+Z) sloped rafters / top truss chords
+        pushStrut('lumber', pPeakN, pEaveN, chordDepthM, memberThickM, ridgeAxisWorld)
+        pushStrut('lumber', pPeakS, pEaveS, chordDepthM, memberThickM, ridgeAxisWorld)
+
+        // Ceiling joist / bottom truss chord
         if (roofSystem !== 'ridge-beam-cathedral') {
           if (roofSystem === 'scissor-truss') {
-            const scLeftA = leftAngle * 0.45
-            const scRightA = rightAngle * 0.45
-            const scPeakY = Math.min(rt.leftWidthM * Math.tan(scLeftA), rt.rightWidthM * Math.tan(scRightA))
-            const scLeftLen = Math.hypot(rt.leftWidthM, scPeakY)
-            const scRightLen = Math.hypot(rt.rightWidthM, scPeakY)
-            boxes.push({ bucket: 'lumber', center: toWorld(-rt.leftWidthM / 2, scPeakY / 2, lz), size: [scLeftLen, 0.089, 0.0381], rotY: rt.rotY, rotZ: Math.atan2(scPeakY, rt.leftWidthM) })
-            boxes.push({ bucket: 'lumber', center: toWorld(rt.rightWidthM / 2, scPeakY / 2, lz), size: [scRightLen, 0.089, 0.0381], rotY: rt.rotY, rotZ: -Math.atan2(scPeakY, rt.rightWidthM) })
+            const scPeak = toWorld(lx, riseM * 0.45, 0)
+            pushStrut('lumber', pWallN, scPeak, 0.089, memberThickM, ridgeAxisWorld)
+            pushStrut('lumber', scPeak, pWallS, 0.089, memberThickM, ridgeAxisWorld)
           } else {
-            boxes.push({ bucket: 'lumber', center: toWorld(spanMidX, 0.06, lz), size: [totalSpanM, 0.14, 0.0381], rotY: rt.rotY })
+            pushStrut('lumber', pWallN, pWallS, 0.14, memberThickM, ridgeAxisWorld)
           }
         }
 
-        // Collar tie (stick-rafter) OR W-web diagonals + galvanized truss gusset plates (truss)
         if (isTruss) {
-          boxes.push({ bucket: 'galv-steel', center: toWorld(0, rt.riseM - 0.07, lz), size: [0.22, 0.14, 0.046], rotY: rt.rotY })
-          const webH = Math.max(0.25, rt.riseM * 0.52)
-          boxes.push({ bucket: 'lumber', center: toWorld(-rt.leftWidthM * 0.35, webH * 0.55, lz), size: [0.038, webH, 0.089], rotY: rt.rotY, rotZ: -0.38 })
-          boxes.push({ bucket: 'lumber', center: toWorld(rt.rightWidthM * 0.35, webH * 0.55, lz), size: [0.038, webH, 0.089], rotY: rt.rotY, rotZ: 0.38 })
-          boxes.push({ bucket: 'galv-steel', center: toWorld(-rt.leftWidthM + 0.12, 0.08, lz), size: [0.18, 0.10, 0.046], rotY: rt.rotY })
-          boxes.push({ bucket: 'galv-steel', center: toWorld(rt.rightWidthM - 0.12, 0.08, lz), size: [0.18, 0.10, 0.046], rotY: rt.rotY })
-        } else if (roofSystem === 'stick-rafter' && i % 2 === 0) {
-          boxes.push({ bucket: 'lumber', center: toWorld(spanMidX * 0.32, rt.riseM * 0.68, lz), size: [totalSpanM * 0.34, 0.089, 0.0381], rotY: rt.rotY })
+          // Exact airtight Fink W-truss triangulation:
+          // Top midpoints MN, MS; bottom third-points BN, BS; peak P
+          const pPeak = toWorld(lx, riseM, 0)
+          const pMidN = toWorld(lx, riseM * 0.5, -halfRun * 0.5)
+          const pMidS = toWorld(lx, riseM * 0.5, halfRun * 0.5)
+          const botY = roofSystem === 'scissor-truss' ? riseM * 0.22 : 0.06
+          const pBotN = toWorld(lx, botY, -halfRun / 3)
+          const pBotS = toWorld(lx, botY, halfRun / 3)
+
+          if (roofSystem === 'attic-truss') {
+            // Attic room knee walls + collar ceiling beam
+            const roomZ = halfRun * 0.45
+            const roomTopY = riseM * (1 - 0.45)
+            pushStrut('lumber', toWorld(lx, 0.06, -roomZ), toWorld(lx, roomTopY, -roomZ), 0.089, memberThickM, ridgeAxisWorld)
+            pushStrut('lumber', toWorld(lx, 0.06, roomZ), toWorld(lx, roomTopY, roomZ), 0.089, memberThickM, ridgeAxisWorld)
+            pushStrut('lumber', toWorld(lx, roomTopY, -roomZ), toWorld(lx, roomTopY, roomZ), 0.089, memberThickM, ridgeAxisWorld)
+          } else {
+            // Classic 4-strut Fink W-web: BN->MN, BN->Peak, BS->Peak, BS->MS
+            pushStrut('lumber', pBotN, pMidN, 0.089, memberThickM, ridgeAxisWorld)
+            pushStrut('lumber', pBotN, pPeak, 0.089, memberThickM, ridgeAxisWorld)
+            pushStrut('lumber', pBotS, pPeak, 0.089, memberThickM, ridgeAxisWorld)
+            pushStrut('lumber', pBotS, pMidS, 0.089, memberThickM, ridgeAxisWorld)
+          }
+
+          // Galvanized steel truss gusset connector plates at Peak, Heels & Panel Points
+          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, riseM - 0.06, 0), size: [0.048, 0.14, 0.22], rotY: seg.yaw })
+          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.07, -halfRun + 0.14), size: [0.048, 0.10, 0.20], rotY: seg.yaw })
+          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.07, halfRun - 0.14), size: [0.048, 0.10, 0.20], rotY: seg.yaw })
+          boxes.push({ bucket: 'galv-steel', center: pBotN, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+          boxes.push({ bucket: 'galv-steel', center: pBotS, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
+        } else if (roofSystem === 'stick-rafter' && i % 2 === 0 && halfRun > 1.2) {
+          // Upper-third collar tie per IRC R802.4.6
+          const tieZ = halfRun * 0.34
+          const tieY = riseM * 0.66
+          pushStrut('lumber', toWorld(lx, tieY, -tieZ), toWorld(lx, tieY, tieZ), 0.089, memberThickM, ridgeAxisWorld)
         }
 
-        // Distributed H2.5A / H10A Galvanized Hurricane Ties at EVERY rafter/truss seat!
+        // Gable-end vertical rake studs at both end trusses/rafters (i === 0 and i === count - 1)
+        if ((i === 0 || i === count - 1) && seg.roofType === 'gable') {
+          const gableStep = 16 * INCHES_TO_METERS
+          for (let gz = -halfRun + gableStep; gz < halfRun - 0.15; gz += gableStep) {
+            const studTopY = riseM * (1 - Math.abs(gz) / halfRun) - 0.06
+            if (studTopY > 0.22) {
+              pushStrut('lumber', toWorld(lx, 0.08, gz), toWorld(lx, studTopY, gz), 0.089, memberThickM, ridgeAxisWorld)
+            }
+          }
+        }
+
+        // Distributed H2.5A / H10A Galvanized Hurricane Ties at EVERY rafter/truss bearing seat!
         if (showConnectors) {
-          boxes.push({ bucket: 'galv-steel', center: toWorld(-rt.leftWidthM + 0.04, 0.03, lz), size: [0.06, 0.14, 0.056], rotY: rt.rotY })
-          boxes.push({ bucket: 'galv-steel', center: toWorld(rt.rightWidthM - 0.04, 0.03, lz), size: [0.06, 0.14, 0.056], rotY: rt.rotY })
+          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, -halfRun + 0.04), size: [0.058, 0.14, 0.06], rotY: seg.yaw })
+          boxes.push({ bucket: 'galv-steel', center: toWorld(lx, 0.02, halfRun - 0.04), size: [0.058, 0.14, 0.06], rotY: seg.yaw })
         }
       }
     }
@@ -653,8 +823,12 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     for (let i = 0; i < list.length; i++) {
       const m = list[i]!
       pos.set(m.center[0], m.center[1], m.center[2])
-      euler.set(m.rotX ?? 0, m.rotY ?? 0, m.rotZ ?? 0, 'YXZ')
-      quat.setFromEuler(euler)
+      if (m.quat) {
+        quat.copy(m.quat)
+      } else {
+        euler.set(0, m.rotY ?? 0, 0, 'YXZ')
+        quat.setFromEuler(euler)
+      }
       scale.set(m.size[0], m.size[1], m.size[2])
       mat4.compose(pos, quat, scale)
       inst.setMatrixAt(i, mat4)
