@@ -21,7 +21,10 @@ import {
   type Vec2,
   type Vec3,
   belongsToLevel,
+  findLevelCommercialRtus,
   getConnectorBySku,
+  isHighestWalledLevelInBuilding,
+  levelSortOrder,
   resolveNodeLevelId,
   sameLevelOrUnscoped,
 } from './tables'
@@ -536,12 +539,30 @@ export function auditStructuralScene(
     const lvlAsm = lvlId
       ? assemblies.find((a) => resolveNodeLevelId(nodes, a) === lvlId)
       : assemblies.find((a) => resolveNodeLevelId(nodes, a) === null) ?? assemblies[0]
-    if (lvlId !== null && assemblies.length > 0 && !lvlAsm) {
-      const lvlScopedNodes = Object.values(scopeNodes).filter((n) => belongsToLevel(scopeNodes, n, lvlId))
-      const lvlHasWalls = lvlScopedNodes.some((n) => n.type === 'wall' && n.visible !== false)
-      const lvlHasStructural = lvlScopedNodes.some((n) => String(n.type ?? '').startsWith('structural:'))
-      // Skip unwalled, unframed roof-deck/terrace levels when other walled stories are structurally framed
-      if (!lvlHasWalls && !lvlHasStructural) continue
+    let isAdoptedUnwalledRoofLevel = false
+    if (lvlId !== null && !lvlAsm) {
+      const lvlNode = nodes[lvlId]
+      const lvlBuildingId = typeof lvlNode?.parentId === 'string' ? lvlNode.parentId : null
+      const hasSameBuildingAssembly = assemblies.some((a) => {
+        const asmLvlId = resolveNodeLevelId(nodes, a)
+        if (!asmLvlId || asmLvlId === lvlId) return false
+        const asmLvlNode = nodes[asmLvlId]
+        const asmBuildingId = typeof asmLvlNode?.parentId === 'string' ? asmLvlNode.parentId : null
+        if (lvlBuildingId || asmBuildingId) return lvlBuildingId === asmBuildingId
+        return true
+      })
+      if (hasSameBuildingAssembly) {
+        const lvlScopedNodes = Object.values(scopeNodes).filter((n) => belongsToLevel(scopeNodes, n, lvlId))
+        const lvlHasWalls = lvlScopedNodes.some((n) => n.type === 'wall' && n.visible !== false)
+        const lvlHasStructural = lvlScopedNodes.some(
+          (n) => String(n.type ?? '').startsWith('structural:') && n.type !== 'structural:firestop',
+        )
+        // Suppress only concealed-cavity draftstops on adopted wall-less roof-deck levels in the same building,
+        // while still auditing IRC R302.11(3) stair stringers and R302.11(5) MEP plate penetrations.
+        if (!lvlHasWalls && !lvlHasStructural) {
+          isAdoptedUnwalledRoofLevel = true
+        }
+      }
     }
     const floorSys =
       (lvlAsm?.floorSystem as 'dimensional' | 'tji-ijoist' | 'open-web-truss' | undefined) ?? 'dimensional'
@@ -558,7 +579,11 @@ export function auditStructuralScene(
       levelId: lvlId,
       floorSystem: floorSys,
       hasAttic,
-    })
+    }).filter((req) =>
+      isAdoptedUnwalledRoofLevel
+        ? req.firestopKind !== 'floor-draftstop' && req.firestopKind !== 'attic-draftstop'
+        : true,
+    )
     const lvlValidFirestops = validFirestops.filter((fs) =>
       sameLevelOrUnscoped(resolveNodeLevelId(nodes, fs), lvlId),
     )
@@ -681,6 +706,357 @@ export function auditStructuralScene(
             message: `MEP run "${run.id}" (${run.type}) penetrates structural column "${col.name ?? col.id}" (${col.designation ?? col.columnType}); piercing load-bearing columns is prohibited.`,
             remediation: `Re-route ${run.type} horizontally around the structural column shaft with >= 1 in clearance.`,
           })
+        }
+      }
+    }
+  }
+
+  // 7. Roof-rafter-plane & exterior-envelope MEP intrusion diagnostics (VIS-07)
+  const OUTDOOR_OR_ROOF_EQUIP_RE =
+    /condenser|heat-pump-outdoor|mini-split-outdoor|rooftop-package|\brtu\b|gas-meter|hose[- ]?bibb|well|outdoor/i
+  const EXTERIOR_MEP_RUN_RE =
+    /refrigerant-lineset|condensate|exhaust|fresh-air|intake|building-drain|sewer|gas|hose[- ]?bibb|outdoor|condenser|\brtu\b/i
+  const isMainDwvVentStack = (n: SceneNodeLike): boolean =>
+    Boolean(n.isMainVentStack) || /Main DWV Soil & Vent Stack|Through Roof/i.test(String(n.name ?? ''))
+
+  type AuditRoofSeg = {
+    cx: number
+    cy: number
+    cz: number
+    yaw: number
+    roofType: string
+    widthM: number
+    depthM: number
+    pitchRad: number
+    overhangM: number
+  }
+
+  const extractAuditRoofSegsForLevel = (
+    targetLvlId: string | null,
+    wallH: number,
+    baseY: number,
+  ): AuditRoofSeg[] => {
+    const segs: AuditRoofSeg[] = []
+    const targetLevelNode = targetLvlId ? nodes[targetLvlId] : undefined
+    const targetBuildingId = typeof targetLevelNode?.parentId === 'string' ? targetLevelNode.parentId : null
+    const targetOrder = targetLevelNode?.type === 'level' ? levelSortOrder(targetLevelNode) : 0
+
+    for (const node of all) {
+      if (node.type !== 'roof-segment' || node.visible === false) continue
+      const segPos = Array.isArray(node.position) ? (node.position as number[]) : [0, 0, 0]
+      let px = typeof segPos[0] === 'number' ? segPos[0] : 0
+      let py = typeof segPos[1] === 'number' ? segPos[1] : 0
+      let pz = typeof segPos[2] === 'number' ? segPos[2] : 0
+      let yaw = typeof node.rotation === 'number' ? node.rotation : 0
+
+      let curParentId = typeof node.parentId === 'string' ? node.parentId : null
+      let belongsHere = !targetLvlId
+      for (let hop = 0; hop < 6 && curParentId; hop++) {
+        if (!targetLvlId || curParentId === targetLvlId) {
+          belongsHere = true
+          break
+        }
+        const parent = nodes[curParentId]
+        if (!parent) break
+        if (parent.type === 'level') {
+          const pBuildingId = typeof parent.parentId === 'string' ? parent.parentId : null
+          const sameBldg = !targetBuildingId || !pBuildingId || targetBuildingId === pBuildingId
+          const parentHasWalls = all.some(
+            (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, parent.id),
+          )
+          if (sameBldg && !parentHasWalls && levelSortOrder(parent) >= targetOrder && isHighestWalledLevelInBuilding(nodes, targetLvlId)) {
+            belongsHere = true
+          }
+          break
+        }
+        if (parent.type === 'roof') {
+          const rot = typeof parent.rotation === 'number' ? parent.rotation : 0
+          const rp = Array.isArray(parent.position) ? (parent.position as number[]) : [0, 0, 0]
+          const cos = Math.cos(rot)
+          const sin = Math.sin(rot)
+          const nx = px * cos + pz * sin
+          const nz = -px * sin + pz * cos
+          px = nx + (typeof rp[0] === 'number' ? rp[0] : 0)
+          py += typeof rp[1] === 'number' ? rp[1] : 0
+          pz = nz + (typeof rp[2] === 'number' ? rp[2] : 0)
+          yaw += rot
+        }
+        curParentId = typeof parent.parentId === 'string' ? parent.parentId : null
+      }
+      if (!belongsHere) continue
+
+      const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
+      const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
+      const rawPitch = typeof node.pitch === 'number' && Number.isFinite(node.pitch) ? node.pitch : 26.57
+      const pitchRad =
+        rawPitch <= 0
+          ? 0
+          : rawPitch > 1.4
+            ? (Math.min(65, rawPitch) * Math.PI) / 180
+            : Math.min((65 * Math.PI) / 180, rawPitch)
+      const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
+      const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
+      const cy = py > 0.05 ? py + segWallH : baseY + wallH + segWallH
+      segs.push({
+        cx: px,
+        cy,
+        cz: pz,
+        yaw,
+        roofType: typeof node.roofType === 'string' ? node.roofType : 'gable',
+        widthM,
+        depthM,
+        pitchRad,
+        overhangM,
+      })
+    }
+    return segs
+  }
+
+  const evalAuditRoofSurfaceY = (
+    x: number,
+    z: number,
+    roofSegs: readonly AuditRoofSeg[],
+    bounds: { minX: number; maxX: number; minZ: number; maxZ: number },
+    baseY: number,
+    wallH: number,
+    pitchRiseOver12: number,
+    isFlatCommercialRoof: boolean,
+  ): number => {
+    if (isFlatCommercialRoof) {
+      return baseY + wallH + 0.2858
+    }
+    if (roofSegs.length > 0) {
+      let bestY: number | null = null
+      for (const seg of roofSegs) {
+        const cosR = Math.cos(seg.yaw)
+        const sinR = Math.sin(seg.yaw)
+        const dx = x - seg.cx
+        const dz = z - seg.cz
+        const lx = dx * cosR - dz * sinR
+        const lz = dx * sinR + dz * cosR
+        if (Math.abs(lx) > seg.widthM / 2 + 0.15 || Math.abs(lz) > seg.depthM / 2 + seg.overhangM + 0.15) {
+          continue
+        }
+        const slopeTan = Math.tan(seg.pitchRad)
+        const sy =
+          seg.roofType === 'shed'
+            ? seg.cy + Math.max(0, seg.depthM / 2 - lz) * slopeTan
+            : seg.cy + Math.max(0, seg.depthM / 2 - Math.abs(lz)) * slopeTan
+        if (bestY === null || sy > bestY) bestY = sy
+      }
+      if (bestY !== null) return bestY
+    }
+    const spanX = bounds.maxX - bounds.minX
+    const spanZ = bounds.maxZ - bounds.minZ
+    const ridgeAlongX = spanX >= spanZ
+    const halfSpan = (ridgeAlongX ? spanZ : spanX) / 2
+    const center = ridgeAlongX ? (bounds.minZ + bounds.maxZ) / 2 : (bounds.minX + bounds.maxX) / 2
+    const distFromRidge = Math.abs((ridgeAlongX ? z : x) - center)
+    return baseY + wallH + Math.max(0, halfSpan - distFromRidge) * (pitchRiseOver12 / 12)
+  }
+
+  for (const { lvlId, scopeNodes } of auditPasses) {
+    const lvlScopedNodes = Object.values(scopeNodes).filter((n) => belongsToLevel(scopeNodes, n, lvlId))
+    const lvlWalls = lvlScopedNodes.filter(
+      (n) => n.type === 'wall' && n.visible !== false && Array.isArray(n.start) && Array.isArray(n.end),
+    )
+    if (lvlWalls.length < 2) continue
+
+    let minX = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let minZ = Number.POSITIVE_INFINITY
+    let maxZ = Number.NEGATIVE_INFINITY
+    let baseY = Number.POSITIVE_INFINITY
+    let maxWallH = 0
+    for (const w of lvlWalls) {
+      const ws = w.start!
+      const we = w.end!
+      if (Number.isFinite(ws[0]) && Number.isFinite(ws[1]) && Number.isFinite(we[0]) && Number.isFinite(we[1])) {
+        minX = Math.min(minX, ws[0], we[0])
+        maxX = Math.max(maxX, ws[0], we[0])
+        minZ = Math.min(minZ, ws[1], we[1])
+        maxZ = Math.max(maxZ, ws[1], we[1])
+      }
+      const elev = typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0
+      if (elev < baseY) baseY = elev
+      const h = typeof w.height === 'number' && Number.isFinite(w.height) && w.height > 1.2 ? w.height : 0
+      if (h > maxWallH) maxWallH = h
+    }
+    if (!Number.isFinite(minX) || maxX - minX < 1.0 || maxZ - minZ < 1.0) continue
+    if (!Number.isFinite(baseY)) baseY = 0
+    const levelNode = lvlId ? nodes[lvlId] : undefined
+    const wallH =
+      maxWallH > 1.5
+        ? maxWallH
+        : typeof levelNode?.height === 'number' && Number.isFinite(levelNode.height) && levelNode.height > 1.5
+          ? levelNode.height
+          : 2.7
+    const bounds = { minX, maxX, minZ, maxZ }
+    const isTopWalledLevel = isHighestWalledLevelInBuilding(nodes, lvlId)
+    const lvlAsm = lvlId
+      ? assemblies.find((a) => resolveNodeLevelId(nodes, a) === lvlId)
+      : assemblies.find((a) => resolveNodeLevelId(nodes, a) === null) ?? assemblies[0]
+    const pitchRise =
+      typeof lvlAsm?.roofPitchRise === 'number' && Number.isFinite(lvlAsm.roofPitchRise)
+        ? lvlAsm.roofPitchRise
+        : 6
+    const levelRoofSegs = isTopWalledLevel ? extractAuditRoofSegsForLevel(lvlId, wallH, baseY) : []
+    const hasCommercialRtu = findLevelCommercialRtus(nodes, lvlId).length > 0
+    const isFlatCommercialRoof = hasCommercialRtu && levelRoofSegs.length === 0
+
+    for (const n of lvlScopedNodes) {
+      if (n.visible === false) continue
+      const t = String(n.type ?? '')
+
+      // 7a. Indoor MEP equipment & plenums vs. roof plane and building wall envelope
+      if (t === 'hvac:equipment' || t === 'hvac:plenum' || t === 'plumbing:equipment') {
+        const pos = n.position
+        if (!Array.isArray(pos) || pos.length < 3) continue
+        const kind = String(n.equipmentKind ?? n.kind ?? '')
+        const isOutdoorOrRoof =
+          n.isOutdoor === true || OUTDOOR_OR_ROOF_EQUIP_RE.test(`${kind} ${String(n.name ?? '')}`)
+        if (isOutdoorOrRoof) continue
+
+        const hM =
+          typeof n.heightM === 'number' && Number.isFinite(n.heightM) && n.heightM > 0
+            ? n.heightM
+            : /air-handler|furnace/i.test(kind)
+              ? 1.22
+              : /water-heater/i.test(kind)
+                ? 1.5
+                : t === 'hvac:plenum'
+                  ? 0.45
+                  : 0.6
+        const topY = pos[1] + hM
+        const insideBounds =
+          pos[0] >= bounds.minX - 0.15 &&
+          pos[0] <= bounds.maxX + 0.15 &&
+          pos[2] >= bounds.minZ - 0.15 &&
+          pos[2] <= bounds.maxZ + 0.15
+
+        if (isTopWalledLevel && insideBounds && topY > baseY + wallH + 0.05) {
+          const roofY = evalAuditRoofSurfaceY(
+            pos[0],
+            pos[2],
+            levelRoofSegs,
+            bounds,
+            baseY,
+            wallH,
+            pitchRise,
+            isFlatCommercialRoof,
+          )
+          const excess = topY - roofY
+          if (excess > 0.08) {
+            push({
+              severity: excess > 0.15 ? 'error' : 'warning',
+              category: 'mep-clash',
+              codeRef: 'IRC R802 / Roof Framing Envelope',
+              nodeId: n.id,
+              message: `Indoor MEP equipment "${n.name ?? n.id}" (${t}) top (${topY.toFixed(2)}m) protrudes +${excess.toFixed(2)}m above the roof framing plane (${roofY.toFixed(2)}m).`,
+              remediation:
+                'Lower indoor equipment/plenum below the ceiling/rafter plane or relocate closer to the ridge / into an indoor mechanical closet.',
+            })
+          }
+        }
+
+        const extOverhang = Math.max(
+          bounds.minX - pos[0],
+          pos[0] - bounds.maxX,
+          bounds.minZ - pos[2],
+          pos[2] - bounds.maxZ,
+        )
+        if (extOverhang > 0.15) {
+          push({
+            severity: extOverhang > 0.6 ? 'error' : 'warning',
+            category: 'mep-clash',
+            codeRef: 'IRC R802 / Building Framing Envelope',
+            nodeId: n.id,
+            message: `Indoor MEP equipment "${n.name ?? n.id}" (${t}) at (${pos[0].toFixed(2)}, ${pos[2].toFixed(2)}) protrudes ${extOverhang.toFixed(2)}m outside the walled building envelope.`,
+            remediation:
+              'Relocate indoor mechanical/plumbing equipment inside the conditioned walled building footprint.',
+          })
+        }
+      }
+
+      // 7b. Indoor MEP ducts, pipes & conduits vs. roof rafter plane and building wall envelope
+      if (
+        (t === 'hvac:duct-run' || t === 'plumbing:pipe-run' || t === 'electrical:conduit-run') &&
+        Array.isArray(n.path) &&
+        n.path.length >= 2
+      ) {
+        const isMainVent = isMainDwvVentStack(n)
+        const isExtRun = EXTERIOR_MEP_RUN_RE.test(`${String(n.system ?? '')} ${String(n.name ?? '')}`)
+        const halfY = resolveMepRunExtents(n).halfY
+        const pts = n.path as ReadonlyArray<Vec3>
+        let roofHitLogged = false
+        let extHitLogged = false
+
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = pts[i]!
+          const b = pts[i + 1]!
+          if (Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) < 0.02) continue
+
+          if (isTopWalledLevel && !isMainVent && !isExtRun && !roofHitLogged) {
+            for (const f of [0, 0.25, 0.5, 0.75, 1]) {
+              const px = a[0] + (b[0] - a[0]) * f
+              const py = a[1] + (b[1] - a[1]) * f
+              const pz = a[2] + (b[2] - a[2]) * f
+              const insideXZ =
+                px >= bounds.minX - 0.1 &&
+                px <= bounds.maxX + 0.1 &&
+                pz >= bounds.minZ - 0.1 &&
+                pz <= bounds.maxZ + 0.1
+              if (!insideXZ || py <= baseY + wallH + 0.05) continue
+              const roofY = evalAuditRoofSurfaceY(
+                px,
+                pz,
+                levelRoofSegs,
+                bounds,
+                baseY,
+                wallH,
+                pitchRise,
+                isFlatCommercialRoof,
+              )
+              const excess = py + halfY - roofY
+              if (excess > 0.08) {
+                roofHitLogged = true
+                push({
+                  severity: excess > 0.15 ? 'error' : 'warning',
+                  category: 'mep-clash',
+                  codeRef: 'IRC R802 / Roof Framing Envelope',
+                  nodeId: n.id,
+                  message: `MEP run "${n.name ?? n.id}" (${t}) top (${(py + halfY).toFixed(2)}m) protrudes +${excess.toFixed(2)}m above the roof framing plane (${roofY.toFixed(2)}m) at (${px.toFixed(2)}, ${pz.toFixed(2)}).`,
+                  remediation:
+                    'Drop the MEP run below the ceiling joists or route centrally inside the attic volume beneath the roof rafters.',
+                })
+                break
+              }
+            }
+          }
+
+          if (!extHitLogged && !isExtRun && !isMainVent) {
+            for (const pt of [a, b]) {
+              const overhang = Math.max(
+                bounds.minX - pt[0],
+                pt[0] - bounds.maxX,
+                bounds.minZ - pt[2],
+                pt[2] - bounds.maxZ,
+              )
+              if (overhang > 0.35) {
+                extHitLogged = true
+                push({
+                  severity: 'warning',
+                  category: 'mep-clash',
+                  codeRef: 'IRC R802 / Building Framing Envelope',
+                  nodeId: n.id,
+                  message: `Indoor MEP run "${n.name ?? n.id}" (${t}) vertex (${pt[0].toFixed(2)}, ${pt[1].toFixed(2)}, ${pt[2].toFixed(2)}) extends ${overhang.toFixed(2)}m outside the walled building envelope.`,
+                  remediation:
+                    'Keep indoor ducts, pipes, and conduits inside the framed exterior wall envelope or mark exterior utility runs explicitly.',
+                })
+                break
+              }
+            }
+          }
         }
       }
     }

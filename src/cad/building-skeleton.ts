@@ -39,9 +39,11 @@ import {
   type SceneNodeLike,
   type Vec2,
   belongsToLevel,
+  findLevelCommercialRtus,
   isHighestWalledLevelInBuilding,
   isLowestWalledLevelInBuilding,
   levelSortOrder,
+  shouldAdoptWallLessRoofLevel,
 } from '../irc/tables'
 
 type BucketId =
@@ -163,9 +165,317 @@ type ExtractedRoofSegment = {
   pitchRad: number
   overhangM: number
   wallHeightM: number
+  /** Optional XZ enclosed-footprint predicate for fallback synthesized roofs (VIS-02). */
+  footprintClip?: (x: number, z: number, marginM?: number) => boolean
 }
 
 type Vec3Tuple = [number, number, number]
+
+const OUTDOOR_SLAB_RE =
+  /\b(pool|swimming|piscine|patio|deck|porch|terrace|balcony|yard|garden|lanai|courtyard|driveway|walkway|sidewalk|step|steps|stair|stairs|landing|apron|stoop|exterior|outdoor|lawn|plaza|paving)\b/i
+
+type WallSeg2D = { ax: number; az: number; bx: number; bz: number; len: number }
+
+function pointToSegmentDist2D(px: number, pz: number, ax: number, az: number, bx: number, bz: number): number {
+  const dx = bx - ax
+  const dz = bz - az
+  const lenSq = dx * dx + dz * dz
+  if (lenSq < 1e-10) return Math.hypot(px - ax, pz - az)
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / lenSq))
+  return Math.hypot(px - (ax + t * dx), pz - (az + t * dz))
+}
+
+function pointInPolygon2D(px: number, pz: number, poly: ReadonlyArray<Vec2>, edgeTol = 1e-4): boolean {
+  const n = poly.length
+  if (n < 3) return false
+  let inside = false
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = poly[i]![0]
+    const zi = poly[i]![1]
+    const xj = poly[j]![0]
+    const zj = poly[j]![1]
+    if (edgeTol > 0 && pointToSegmentDist2D(px, pz, xj, zj, xi, zi) <= edgeTol) return true
+    const intersect = zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi + 1e-18) + xi
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
+function polygonArea2D(poly: ReadonlyArray<Vec2>): number {
+  let sum = 0
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i]!
+    const b = poly[(i + 1) % poly.length]!
+    sum += a[0] * b[1] - b[0] * a[1]
+  }
+  return Math.abs(sum) * 0.5
+}
+
+function polygonBounds2D(poly: ReadonlyArray<Vec2>): {
+  minX: number
+  maxX: number
+  minZ: number
+  maxZ: number
+} {
+  let minX = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let minZ = Number.POSITIVE_INFINITY
+  let maxZ = Number.NEGATIVE_INFINITY
+  for (const [x, z] of poly) {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) continue
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (z < minZ) minZ = z
+    if (z > maxZ) maxZ = z
+  }
+  return { minX, maxX, minZ, maxZ }
+}
+
+/**
+ * Exact 2D segment vs. simple (convex or concave) polygon clipping in XZ.
+ * Returns sorted, merged `[t0, t1]` parameter intervals lying inside `poly`.
+ */
+function clipSegmentToPolygon2D(a: Vec2, b: Vec2, poly: ReadonlyArray<Vec2>): Array<[number, number]> {
+  const n = poly.length
+  if (n < 3) return []
+  const dx = b[0] - a[0]
+  const dz = b[1] - a[1]
+  const segLen = Math.hypot(dx, dz)
+  if (segLen < 1e-6) return []
+
+  const ts: number[] = [0, 1]
+  for (let i = 0; i < n; i++) {
+    const v0 = poly[i]!
+    const v1 = poly[(i + 1) % n]!
+    const ex = v1[0] - v0[0]
+    const ez = v1[1] - v0[1]
+    const denom = dx * ez - dz * ex
+    if (Math.abs(denom) > 1e-10) {
+      const t = ((v0[0] - a[0]) * ez - (v0[1] - a[1]) * ex) / denom
+      const u = ((v0[0] - a[0]) * dz - (v0[1] - a[1]) * dx) / denom
+      if (t > 1e-7 && t < 1 - 1e-7 && u >= -1e-6 && u <= 1 + 1e-6) {
+        ts.push(t)
+      }
+    } else {
+      // Collinear edge: project edge endpoints onto segment
+      for (const v of [v0, v1]) {
+        const perp = Math.abs((v[0] - a[0]) * dz - (v[1] - a[1]) * dx) / segLen
+        if (perp <= 1e-4) {
+          const t = ((v[0] - a[0]) * dx + (v[1] - a[1]) * dz) / (segLen * segLen)
+          if (t > 1e-7 && t < 1 - 1e-7) ts.push(t)
+        }
+      }
+    }
+  }
+
+  ts.sort((x, y) => x - y)
+  const uniq: number[] = [ts[0]!]
+  for (let i = 1; i < ts.length; i++) {
+    if (ts[i]! - uniq[uniq.length - 1]! > 1e-6) uniq.push(ts[i]!)
+  }
+
+  const kept: Array<[number, number]> = []
+  for (let i = 0; i < uniq.length - 1; i++) {
+    const t0 = uniq[i]!
+    const t1 = uniq[i + 1]!
+    if (t1 - t0 < 1e-6) continue
+    const tm = (t0 + t1) * 0.5
+    if (pointInPolygon2D(a[0] + dx * tm, a[1] + dz * tm, poly, 1e-4)) {
+      const prev = kept[kept.length - 1]
+      if (prev && t0 - prev[1] <= 1e-5) prev[1] = t1
+      else kept.push([t0, t1])
+    }
+  }
+  return kept
+}
+
+/**
+ * 16-ray enclosure test: returns true when `(px, pz)` lies strictly inside a closed
+ * walled building envelope (immune to interior partition walls, concave L/U-shapes,
+ * and arbitrary building rotations).
+ */
+function isPointEnclosedByWalls(px: number, pz: number, wallSegs: ReadonlyArray<WallSeg2D>): boolean {
+  if (wallSegs.length < 3) return false
+  const RAYS = 16
+  const phase = 0.037 // irrational-like offset avoids dead-parallel rays and corner grazing
+  for (let k = 0; k < RAYS; k++) {
+    const ang = phase + (k * Math.PI * 2) / RAYS
+    const rdx = Math.cos(ang)
+    const rdz = Math.sin(ang)
+    let hit = false
+    for (let i = 0; i < wallSegs.length; i++) {
+      const w = wallSegs[i]!
+      const ex = w.bx - w.ax
+      const ez = w.bz - w.az
+      const denom = rdx * ez - rdz * ex
+      if (Math.abs(denom) <= 1e-10) continue
+      const t = ((w.ax - px) * ez - (w.az - pz) * ex) / denom
+      if (t <= 1e-4) continue
+      const u = ((w.ax - px) * rdz - (w.az - pz) * rdx) / denom
+      const ext = Math.min(0.25, 0.15 / Math.max(0.25, w.len))
+      if (u >= -ext && u <= 1 + ext) {
+        hit = true
+        break
+      }
+    }
+    if (!hit) return false
+  }
+  return true
+}
+
+function pointNearPolygonEdges2D(px: number, pz: number, poly: ReadonlyArray<Vec2>, maxDist: number): boolean {
+  const n = poly.length
+  for (let i = 0; i < n; i++) {
+    const a = poly[i]!
+    const b = poly[(i + 1) % n]!
+    if (pointToSegmentDist2D(px, pz, a[0], a[1], b[0], b[1]) <= maxDist) return true
+  }
+  return false
+}
+
+/**
+ * Determine whether a slab is an outdoor/unwalled surface (pool, patio, deck, yard pad,
+ * exterior step) that must be excluded from interior floor-joist synthesis (VIS-03).
+ */
+function isOutdoorOrUnwalledSlab(
+  slab: SceneNodeLike,
+  wallSegs: ReadonlyArray<WallSeg2D>,
+  outdoorZonePolys: ReadonlyArray<ReadonlyArray<Vec2>>,
+  baseWallElev: number,
+): boolean {
+  const label = `${String(slab.name ?? '')} ${String(slab.category ?? '')} ${String(slab.role ?? '')} ${String(slab.material ?? '')}`
+  if (OUTDOOR_SLAB_RE.test(label)) return true
+
+  const poly = slab.polygon as ReadonlyArray<Vec2>
+  const b = polygonBounds2D(poly)
+  if (!Number.isFinite(b.minX)) return true
+
+  // Sample verified interior points inside `poly` (safe for concave U/L-shaped slabs whose vertex-average centroid
+  // may fall in an outdoor courtyard/pool cutout outside `poly`).
+  let cx = 0
+  let cz = 0
+  for (const [x, z] of poly) {
+    cx += x
+    cz += z
+  }
+  cx /= poly.length
+  cz /= poly.length
+
+  const samples: Vec2[] = []
+  if (pointInPolygon2D(cx, cz, poly, 0)) samples.push([cx, cz])
+  const gridN = 5
+  for (let ix = 0; ix < gridN; ix++) {
+    const sx = b.minX + ((b.maxX - b.minX) * (ix + 0.5)) / gridN
+    for (let iz = 0; iz < gridN; iz++) {
+      const sz = b.minZ + ((b.maxZ - b.minZ) * (iz + 0.5)) / gridN
+      if (pointInPolygon2D(sx, sz, poly, 0)) samples.push([sx, sz])
+    }
+  }
+  if (samples.length === 0) samples.push([cx, cz])
+
+  if (outdoorZonePolys.length > 0) {
+    let outdoorCount = 0
+    for (const [sx, sz] of samples) {
+      if (outdoorZonePolys.some((zp) => pointInPolygon2D(sx, sz, zp, 0.02))) outdoorCount += 1
+    }
+    if (outdoorCount / samples.length >= 0.5) return true
+  }
+
+  if (wallSegs.length >= 3) {
+    let enclosed = 0
+    for (const [sx, sz] of samples) {
+      if (isPointEnclosedByWalls(sx, sz, wallSegs)) enclosed += 1
+    }
+    const enclosedRatio = enclosed / samples.length
+    const area = polygonArea2D(poly)
+    const elev = typeof slab.elevation === 'number' && Number.isFinite(slab.elevation) ? slab.elevation : 0
+    // Exclude small elevated exterior steps/stoops (e.g. elev 0.30..0.40m pads) not enclosed by walls
+    if (area < 4.5 && elev > baseWallElev + 0.12 && enclosedRatio < 0.5) return true
+    if (enclosedRatio < 0.35) return true
+  }
+
+  return false
+}
+
+/**
+ * Clip a 3D framing segment `pA -> pB` in XZ against an arbitrary enclosed-footprint predicate,
+ * returning all contiguous inside sub-segments >= `minLenM`.
+ */
+function clipSegmentToFootprint3D(
+  pA: readonly [number, number, number],
+  pB: readonly [number, number, number],
+  isInsideXZ: (x: number, z: number) => boolean,
+  minLenM = 0.12,
+): Array<{ start: Vec3Tuple; end: Vec3Tuple; clippedStart: boolean; clippedEnd: boolean }> {
+  const totalLen = Math.hypot(pB[0] - pA[0], pB[1] - pA[1], pB[2] - pA[2])
+  if (totalLen < minLenM) return []
+
+  const testAt = (t: number): boolean =>
+    isInsideXZ(pA[0] + (pB[0] - pA[0]) * t, pA[2] + (pB[2] - pA[2]) * t)
+
+  const refine = (tIn: number, tOut: number): number => {
+    let lo = tIn
+    let hi = tOut
+    for (let iter = 0; iter < 12; iter++) {
+      const mid = (lo + hi) * 0.5
+      if (testAt(mid)) lo = mid
+      else hi = mid
+    }
+    return lo
+  }
+
+  const N = 64
+  const out: Array<{ start: Vec3Tuple; end: Vec3Tuple; clippedStart: boolean; clippedEnd: boolean }> = []
+  let prevIn = testAt(0)
+  let curStart = prevIn ? 0 : -1
+
+  for (let i = 1; i <= N; i++) {
+    const tPrev = (i - 1) / N
+    const tCur = i / N
+    const curIn = testAt(tCur)
+    if (!prevIn && curIn) {
+      curStart = refine(tCur, tPrev)
+    } else if (prevIn && !curIn) {
+      const tEnd = refine(tPrev, tCur)
+      if ((tEnd - curStart) * totalLen >= minLenM) {
+        out.push({
+          start: lerpVec3(pA, pB, curStart),
+          end: lerpVec3(pA, pB, tEnd),
+          clippedStart: curStart > 0.002,
+          clippedEnd: tEnd < 0.998,
+        })
+      }
+      curStart = -1
+    }
+    prevIn = curIn
+  }
+  if (prevIn && curStart >= 0 && (1 - curStart) * totalLen >= minLenM) {
+    out.push({
+      start: lerpVec3(pA, pB, curStart),
+      end: lerpVec3(pA, pB, 1),
+      clippedStart: curStart > 0.002,
+      clippedEnd: false,
+    })
+  }
+  return out
+}
+
+function subtractInterval1D(
+  intervals: ReadonlyArray<readonly [number, number]>,
+  cutMin: number,
+  cutMax: number,
+): Array<[number, number]> {
+  const out: Array<[number, number]> = []
+  for (const [a, b] of intervals) {
+    if (cutMax <= a || cutMin >= b) {
+      out.push([a, b])
+    } else {
+      if (cutMin > a) out.push([a, cutMin])
+      if (cutMax < b) out.push([cutMax, b])
+    }
+  }
+  return out
+}
 
 /**
  * Evaluate the top roof-plane elevation `y` of `seg` at world `(wx, wz)`, or `null`
@@ -331,45 +641,6 @@ function clipSegmentAboveHosts(
   }
 }
 
-function shouldAdoptWallLessRoofLevel(
-  nodes: Readonly<Record<string, SceneNodeLike>>,
-  targetLevelId: string,
-  roofLevel: SceneNodeLike,
-): boolean {
-  const targetLevel = nodes[targetLevelId]
-  if (!targetLevel) return false
-  // Must belong to the same parent building (when parentIds are set)
-  if (
-    typeof targetLevel.parentId === 'string' &&
-    typeof roofLevel.parentId === 'string' &&
-    targetLevel.parentId !== roofLevel.parentId
-  ) {
-    return false
-  }
-  const allValues = Object.values(nodes)
-  const roofLevelHasWalls = allValues.some(
-    (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, roofLevel.id),
-  )
-  if (roofLevelHasWalls) return false
-
-  const roofOrder = levelSortOrder(roofLevel)
-  const siblingWalledLevels = allValues
-    .filter(
-      (n) =>
-        n.type === 'level' &&
-        n.id !== roofLevel.id &&
-        n.parentId === roofLevel.parentId &&
-        allValues.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id)),
-    )
-    .sort((a, b) => levelSortOrder(a) - levelSortOrder(b))
-
-  if (siblingWalledLevels.length === 0) return false
-  // Adopt only onto the highest walled level strictly below (or equal if order tied) the wall-less roof level
-  const belowRoof = siblingWalledLevels.filter((l) => levelSortOrder(l) <= roofOrder)
-  const hostLevel = belowRoof.length > 0 ? belowRoof[belowRoof.length - 1]! : siblingWalledLevels[siblingWalledLevels.length - 1]!
-  return hostLevel.id === targetLevelId
-}
-
 function extractLevelRoofSegments(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
@@ -511,13 +782,50 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     }
   }
   const levelNode = levelId ? nodes[levelId] : undefined
+  const maxExplicitWallH = walls.reduce(
+    (m, w) => Math.max(m, typeof w.height === 'number' && Number.isFinite(w.height) && w.height > 1.2 ? w.height : 0),
+    0,
+  )
   const defaultWallHeightM =
     typeof levelNode?.height === 'number' && levelNode.height > 1.5
       ? levelNode.height
-      : typeof assembly.wallHeightM === 'number' && assembly.wallHeightM > 1.5
-        ? assembly.wallHeightM
-        : 2.55
+      : maxExplicitWallH > 1.5
+        ? maxExplicitWallH
+        : typeof assembly.wallHeightM === 'number' && assembly.wallHeightM > 1.5
+          ? assembly.wallHeightM
+          : 2.7
   const jDepthM = joistDepthIn * INCHES_TO_METERS
+
+  // Precompute visible wall segments and outdoor zone polygons for enclosed-footprint & slab filtering (VIS-02 / VIS-03)
+  const visibleWallSegs: WallSeg2D[] = []
+  let minWallElev = Number.POSITIVE_INFINITY
+  for (const w of walls) {
+    if (w.visible === false) continue
+    const ax = Number(w.start![0])
+    const az = Number(w.start![1])
+    const bx = Number(w.end![0])
+    const bz = Number(w.end![1])
+    const len = Math.hypot(bx - ax, bz - az)
+    if (Number.isFinite(len) && len >= 0.25) {
+      visibleWallSegs.push({ ax, az, bx, bz, len })
+      const elev = typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0
+      if (elev < minWallElev) minWallElev = elev
+    }
+  }
+  const baseWallElev = Number.isFinite(minWallElev) ? minWallElev : 0
+  const levelZones = allLevelNodes.filter(
+    (n) => (n.type === 'zone' || n.type === 'room') && n.visible !== false && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3,
+  )
+  const outdoorZonePolys: Array<ReadonlyArray<Vec2>> = []
+  const indoorZonePolys: Array<ReadonlyArray<Vec2>> = []
+  for (const z of levelZones) {
+    const poly = z.polygon as ReadonlyArray<Vec2>
+    if (OUTDOOR_SLAB_RE.test(String(z.name ?? ''))) outdoorZonePolys.push(poly)
+    else indoorZonePolys.push(poly)
+  }
+  const interiorSlabs = slabs.filter(
+    (s) => s.visible !== false && !isOutdoorOrUnwalledSlab(s, visibleWallSegs, outdoorZonePolys, baseWallElev),
+  )
 
   const boxes: MemberBox[] = []
 
@@ -799,30 +1107,60 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   // 2. FLOOR FRAMING SYSTEM (TJI I-JOISTS / WARREN OPEN-WEB TRUSSES / DIMENSIONAL)
   // ============================================================================
   if (showFloor) {
-    const floorRegions: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; topY: number }> = []
-    for (const slab of slabs) {
+    type FloorRegion = {
+      poly: ReadonlyArray<Vec2>
+      minX: number
+      maxX: number
+      minZ: number
+      maxZ: number
+      topY: number
+      clipToWalls: boolean
+    }
+    const floorRegions: FloorRegion[] = []
+    for (const slab of interiorSlabs) {
       const poly = slab.polygon as ReadonlyArray<Vec2>
-      let minX = Number.POSITIVE_INFINITY
-      let maxX = Number.NEGATIVE_INFINITY
-      let minZ = Number.POSITIVE_INFINITY
-      let maxZ = Number.NEGATIVE_INFINITY
-      for (const [px, pz] of poly) {
-        if (px < minX) minX = px
-        if (px > maxX) maxX = px
-        if (pz < minZ) minZ = pz
-        if (pz > maxZ) maxZ = pz
-      }
-      if (Number.isFinite(minX) && maxX - minX > 0.5 && maxZ - minZ > 0.5) {
-        const elev = typeof slab.elevation === 'number' ? slab.elevation : 0
+      const b = polygonBounds2D(poly)
+      if (Number.isFinite(b.minX) && b.maxX - b.minX > 0.5 && b.maxZ - b.minZ > 0.5) {
+        const elev = typeof slab.elevation === 'number' && Number.isFinite(slab.elevation) ? slab.elevation : 0
         const slabThick = typeof slab.thickness === 'number' && slab.thickness > 0 ? slab.thickness : 0.05
         // Seat floor joists strictly below the slab soffit so plates/flanges never z-fight through finished flooring
-        floorRegions.push({ minX, maxX, minZ, maxZ, topY: elev - slabThick - 0.015 })
+        floorRegions.push({
+          poly,
+          minX: b.minX,
+          maxX: b.maxX,
+          minZ: b.minZ,
+          maxZ: b.maxZ,
+          topY: elev - slabThick - 0.015,
+          clipToWalls: false,
+        })
       }
     }
-    if (floorRegions.length === 0 && walls.length >= 2) {
-      const b = computeLevelBounds(nodes, levelId)
-      if (b.maxX - b.minX > 1 && b.maxZ - b.minZ > 1) {
-        floorRegions.push({ minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ, topY: b.baseElevationM - 0.02 })
+    if (floorRegions.length === 0 && visibleWallSegs.length >= 2) {
+      let wMinX = Number.POSITIVE_INFINITY
+      let wMaxX = Number.NEGATIVE_INFINITY
+      let wMinZ = Number.POSITIVE_INFINITY
+      let wMaxZ = Number.NEGATIVE_INFINITY
+      for (const ws of visibleWallSegs) {
+        wMinX = Math.min(wMinX, ws.ax, ws.bx)
+        wMaxX = Math.max(wMaxX, ws.ax, ws.bx)
+        wMinZ = Math.min(wMinZ, ws.az, ws.bz)
+        wMaxZ = Math.max(wMaxZ, ws.az, ws.bz)
+      }
+      if (Number.isFinite(wMinX) && wMaxX - wMinX > 1 && wMaxZ - wMinZ > 1) {
+        floorRegions.push({
+          poly: [
+            [wMinX, wMinZ],
+            [wMaxX, wMinZ],
+            [wMaxX, wMaxZ],
+            [wMinX, wMaxZ],
+          ],
+          minX: wMinX,
+          maxX: wMaxX,
+          minZ: wMinZ,
+          maxZ: wMaxZ,
+          topY: baseWallElev - 0.02,
+          clipToWalls: visibleWallSegs.length >= 3,
+        })
       }
     }
 
@@ -834,62 +1172,116 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       const jCenterY = reg.topY - jDepthM / 2
       const rimThick = 0.0381
 
-      // 4 perimeter rim boards
-      boxes.push({ bucket: 'osb-web', center: [(reg.minX + reg.maxX) / 2, jCenterY, reg.minZ + rimThick / 2], size: [spanX, jDepthM, rimThick] })
-      boxes.push({ bucket: 'osb-web', center: [(reg.minX + reg.maxX) / 2, jCenterY, reg.maxZ - rimThick / 2], size: [spanX, jDepthM, rimThick] })
-      boxes.push({ bucket: 'osb-web', center: [reg.minX + rimThick / 2, jCenterY, (reg.minZ + reg.maxZ) / 2], size: [rimThick, jDepthM, spanZ] })
-      boxes.push({ bucket: 'osb-web', center: [reg.maxX - rimThick / 2, jCenterY, (reg.minZ + reg.maxZ) / 2], size: [rimThick, jDepthM, spanZ] })
+      // Exact polygon-perimeter rim boards (strictly follows rotated/L-shaped slab edges, never an oversized AABB)
+      if (!reg.clipToWalls) {
+        for (let ei = 0; ei < reg.poly.length; ei++) {
+          const v0 = reg.poly[ei]!
+          const v1 = reg.poly[(ei + 1) % reg.poly.length]!
+          const eLen = Math.hypot(v1[0] - v0[0], v1[1] - v0[1])
+          if (!Number.isFinite(eLen) || eLen < 0.08) continue
+          const ux = (v1[0] - v0[0]) / eLen
+          const uz = (v1[1] - v0[1]) / eLen
+          const nx = -uz
+          const nz = ux
+          const eRotY = -Math.atan2(uz, ux)
+          pushWallBox('osb-web', v0[0], v0[1], ux, uz, nx, nz, eRotY, eLen / 2, jCenterY, eLen, jDepthM, rimThick)
+        }
+      } else {
+        // Wall-only fallback: align rim joists along actual wall footprints instead of an oversized AABB
+        for (const ws of visibleWallSegs) {
+          const ux = (ws.bx - ws.ax) / ws.len
+          const uz = (ws.bz - ws.az) / ws.len
+          const nx = -uz
+          const nz = ux
+          const eRotY = -Math.atan2(uz, ux)
+          pushWallBox('osb-web', ws.ax, ws.az, ux, uz, nx, nz, eRotY, ws.len / 2, jCenterY, ws.len, jDepthM, rimThick)
+        }
+      }
 
       const spanAlongX = spanX <= spanZ
       const runStart = spanAlongX ? reg.minZ + joistSpacingM : reg.minX + joistSpacingM
       const runEnd = spanAlongX ? reg.maxZ - 0.08 : reg.maxX - 0.08
-      const joistLen = Math.max(0.4, (spanAlongX ? spanX : spanZ) - rimThick * 2)
-      const joistMid = spanAlongX ? (reg.minX + reg.maxX) / 2 : (reg.minZ + reg.maxZ) / 2
       const rotY = spanAlongX ? 0 : Math.PI / 2
       const sideHint: [number, number, number] = spanAlongX ? [0, 0, 1] : [1, 0, 0]
 
       for (let pos = runStart; pos <= runEnd; pos += joistSpacingM) {
-        const cx = spanAlongX ? joistMid : pos
-        const cz = spanAlongX ? pos : joistMid
+        const lineA: Vec2 = spanAlongX ? [reg.minX - 0.05, pos] : [pos, reg.minZ - 0.05]
+        const lineB: Vec2 = spanAlongX ? [reg.maxX + 0.05, pos] : [pos, reg.maxZ + 0.05]
+        const polyIntervals = clipSegmentToPolygon2D(lineA, lineB, reg.poly)
 
-        if (floorSystem === 'tji-ijoist') {
-          const flangeH = 0.0381
-          const flangeW = 0.0635
-          const webH = Math.max(0.08, jDepthM - flangeH * 2)
-          boxes.push({ bucket: 'header-lvl', center: [cx, reg.topY - flangeH / 2, cz], size: [joistLen, flangeH, flangeW], rotY })
-          boxes.push({ bucket: 'header-lvl', center: [cx, reg.topY - jDepthM + flangeH / 2, cz], size: [joistLen, flangeH, flangeW], rotY })
-          boxes.push({ bucket: 'osb-web', center: [cx, jCenterY, cz], size: [joistLen, webH, 0.011], rotY })
-        } else if (floorSystem === 'open-web-truss') {
-          const chordH = 0.0381
-          const chordW = 0.0889
-          const topChordY = reg.topY - chordH / 2
-          const botChordY = reg.topY - jDepthM + chordH / 2
-          boxes.push({ bucket: 'lumber', center: [cx, topChordY, cz], size: [joistLen, chordH, chordW], rotY })
-          boxes.push({ bucket: 'lumber', center: [cx, botChordY, cz], size: [joistLen, chordH, chordW], rotY })
-          // True Warren zigzag diagonal webbing joining top & bottom chords cleanly
-          const bays = Math.max(4, Math.min(12, Math.round(joistLen / 0.55)))
-          for (let bi = 0; bi < bays; bi++) {
-            const u0 = -joistLen / 2 + (joistLen * bi) / bays
-            const u1 = -joistLen / 2 + (joistLen * (bi + 1)) / bays
-            const y0 = bi % 2 === 0 ? botChordY : topChordY
-            const y1 = bi % 2 === 0 ? topChordY : botChordY
-            const p0: [number, number, number] = spanAlongX ? [cx + u0, y0, cz] : [cx, y0, cz + u0]
-            const p1: [number, number, number] = spanAlongX ? [cx + u1, y1, cz] : [cx, y1, cz + u1]
-            pushStrut('lumber', p0, p1, 0.038, 0.065, sideHint)
-            if (bi > 0) {
-              boxes.push({ bucket: 'galv-steel', center: p0, size: [0.065, 0.045, chordW + 0.008], rotY })
+        const subSegments: Array<[Vec2, Vec2]> = []
+        for (const [t0, t1] of polyIntervals) {
+          const ax = lineA[0] + (lineB[0] - lineA[0]) * t0
+          const az = lineA[1] + (lineB[1] - lineA[1]) * t0
+          const bx = lineA[0] + (lineB[0] - lineA[0]) * t1
+          const bz = lineA[1] + (lineB[1] - lineA[1]) * t1
+          if (reg.clipToWalls) {
+            const clipped = clipSegmentToFootprint3D(
+              [ax, jCenterY, az],
+              [bx, jCenterY, bz],
+              (x, z) => isPointEnclosedByWalls(x, z, visibleWallSegs),
+              0.25,
+            )
+            for (const c of clipped) {
+              subSegments.push([
+                [c.start[0], c.start[2]],
+                [c.end[0], c.end[2]],
+              ])
             }
+          } else {
+            subSegments.push([
+              [ax, az],
+              [bx, bz],
+            ])
           }
-        } else {
-          boxes.push({ bucket: 'lumber', center: [cx, jCenterY, cz], size: [joistLen, jDepthM, 0.0381], rotY })
         }
 
-        if (showConnectors) {
-          const endOffset = joistLen / 2 - 0.02
-          for (const dir of [-1, 1]) {
-            const hx = spanAlongX ? cx + dir * endOffset : cx
-            const hz = spanAlongX ? cz : cz + dir * endOffset
-            boxes.push({ bucket: 'galv-steel', center: [hx, jCenterY - 0.02, hz], size: [0.05, jDepthM * 0.72, 0.072], rotY })
+        for (const [sA, sB] of subSegments) {
+          const rawLen = Math.hypot(sB[0] - sA[0], sB[1] - sA[1])
+          const joistLen = rawLen - rimThick * 2
+          if (joistLen < 0.25) continue
+          const cx = (sA[0] + sB[0]) / 2
+          const cz = (sA[1] + sB[1]) / 2
+
+          if (floorSystem === 'tji-ijoist') {
+            const flangeH = 0.0381
+            const flangeW = 0.0635
+            const webH = Math.max(0.08, jDepthM - flangeH * 2)
+            boxes.push({ bucket: 'header-lvl', center: [cx, reg.topY - flangeH / 2, cz], size: [joistLen, flangeH, flangeW], rotY })
+            boxes.push({ bucket: 'header-lvl', center: [cx, reg.topY - jDepthM + flangeH / 2, cz], size: [joistLen, flangeH, flangeW], rotY })
+            boxes.push({ bucket: 'osb-web', center: [cx, jCenterY, cz], size: [joistLen, webH, 0.011], rotY })
+          } else if (floorSystem === 'open-web-truss') {
+            const chordH = 0.0381
+            const chordW = 0.0889
+            const topChordY = reg.topY - chordH / 2
+            const botChordY = reg.topY - jDepthM + chordH / 2
+            boxes.push({ bucket: 'lumber', center: [cx, topChordY, cz], size: [joistLen, chordH, chordW], rotY })
+            boxes.push({ bucket: 'lumber', center: [cx, botChordY, cz], size: [joistLen, chordH, chordW], rotY })
+            // True Warren zigzag diagonal webbing joining top & bottom chords cleanly
+            const bays = Math.max(4, Math.min(12, Math.round(joistLen / 0.55)))
+            for (let bi = 0; bi < bays; bi++) {
+              const u0 = -joistLen / 2 + (joistLen * bi) / bays
+              const u1 = -joistLen / 2 + (joistLen * (bi + 1)) / bays
+              const y0 = bi % 2 === 0 ? botChordY : topChordY
+              const y1 = bi % 2 === 0 ? topChordY : botChordY
+              const p0: [number, number, number] = spanAlongX ? [cx + u0, y0, cz] : [cx, y0, cz + u0]
+              const p1: [number, number, number] = spanAlongX ? [cx + u1, y1, cz] : [cx, y1, cz + u1]
+              pushStrut('lumber', p0, p1, 0.038, 0.065, sideHint)
+              if (bi > 0) {
+                boxes.push({ bucket: 'galv-steel', center: p0, size: [0.065, 0.045, chordW + 0.008], rotY })
+              }
+            }
+          } else {
+            boxes.push({ bucket: 'lumber', center: [cx, jCenterY, cz], size: [joistLen, jDepthM, 0.0381], rotY })
+          }
+
+          if (showConnectors) {
+            const endOffset = joistLen / 2 - 0.02
+            for (const dir of [-1, 1]) {
+              const hx = spanAlongX ? cx + dir * endOffset : cx
+              const hz = spanAlongX ? cz : cz + dir * endOffset
+              boxes.push({ bucket: 'galv-steel', center: [hx, jCenterY - 0.02, hz], size: [0.05, jDepthM * 0.72, 0.072], rotY })
+            }
           }
         }
       }
@@ -903,36 +1295,291 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     const levelBounds = computeLevelBounds(nodes, levelId)
     let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM, levelBounds.baseElevationM)
 
-    // Fallback when no roof-segment exists yet: synthesize gable roofs per transitively connected footprint cluster
-    // ONLY on the highest walled story (so lower floors of multi-story buildings never project a roof into the story above!)
-    if (roofSegments.length === 0 && walls.length >= 2 && isHighestWalledLevelInBuilding(nodes, levelId)) {
-      const clusters = clusterLevelFootprints(nodes, levelId, 0.35)
-      for (const env of clusters) {
-        const spanX = env.maxX - env.minX
-        const spanZ = env.maxZ - env.minZ
-        if (spanX > 1.5 && spanZ > 1.5) {
-          const ridgeAlongX = spanX >= spanZ
-          roofSegments.push({
-            cx: (env.minX + env.maxX) / 2,
-            cy: env.baseElevationM + env.avgWallHeightM,
-            cz: (env.minZ + env.maxZ) / 2,
-            yaw: ridgeAlongX ? 0 : Math.PI / 2,
-            roofType: 'gable',
-            widthM: ridgeAlongX ? spanX : spanZ,
-            depthM: ridgeAlongX ? spanZ : spanX,
-            pitchRad: Math.atan(6 / 12),
-            overhangM: 0.4,
-            wallHeightM: 0,
-          })
-        }
-      }
-    }
+    const levelRtus = findLevelCommercialRtus(nodes, levelId)
 
     const isTruss =
       roofSystem === 'fink-truss' || roofSystem === 'scissor-truss' || roofSystem === 'attic-truss'
     const rafterSpacingM = (isTruss ? 24 : 16) * INCHES_TO_METERS
     const chordDepthM = (isTruss ? 5.5 : 7.25) * INCHES_TO_METERS
     const memberThickM = 0.0381
+
+    // Fallback when no roof-segment exists yet: synthesize commercial flat roof deck with RTU curb opening (VIS-04)
+    // OR footprint-clipped gable roofs seated on perimeter/tallest wall height (VIS-02), ONLY on the highest walled story.
+    if (roofSegments.length === 0 && walls.length >= 2 && isHighestWalledLevelInBuilding(nodes, levelId)) {
+      const clusters = clusterLevelFootprints(nodes, levelId, 0.35)
+      for (const env of clusters) {
+        const clusterWalls = walls.filter((w) => {
+          if (w.visible === false) return false
+          const sx = Number(w.start![0])
+          const sz = Number(w.start![1])
+          const ex = Number(w.end![0])
+          const ez = Number(w.end![1])
+          const wMinX = Math.min(sx, ex)
+          const wMaxX = Math.max(sx, ex)
+          const wMinZ = Math.min(sz, ez)
+          const wMaxZ = Math.max(sz, ez)
+          return (
+            wMinX <= env.maxX + 0.45 &&
+            wMaxX >= env.minX - 0.45 &&
+            wMinZ <= env.maxZ + 0.45 &&
+            wMaxZ >= env.minZ - 0.45
+          )
+        })
+        if (clusterWalls.length < 2) continue
+
+        // VIS-02: Compute true walled footprint bounds & perimeter/tallest wall height (NEVER average low interior partitions!)
+        let cMinX = Number.POSITIVE_INFINITY
+        let cMaxX = Number.NEGATIVE_INFINITY
+        let cMinZ = Number.POSITIVE_INFINITY
+        let cMaxZ = Number.NEGATIVE_INFINITY
+        const clusterWallSegs: WallSeg2D[] = []
+        for (const w of clusterWalls) {
+          const ax = Number(w.start![0])
+          const az = Number(w.start![1])
+          const bx = Number(w.end![0])
+          const bz = Number(w.end![1])
+          const len = Math.hypot(bx - ax, bz - az)
+          if (!Number.isFinite(len) || len < 0.25) continue
+          clusterWallSegs.push({ ax, az, bx, bz, len })
+          cMinX = Math.min(cMinX, ax, bx)
+          cMaxX = Math.max(cMaxX, ax, bx)
+          cMinZ = Math.min(cMinZ, az, bz)
+          cMaxZ = Math.max(cMaxZ, az, bz)
+        }
+        if (!Number.isFinite(cMinX)) continue
+
+        const clusterInteriorPolys: Array<ReadonlyArray<Vec2>> = []
+        for (const s of interiorSlabs) {
+          const poly = s.polygon as ReadonlyArray<Vec2>
+          const sb = polygonBounds2D(poly)
+          if (sb.minX <= cMaxX + 0.45 && sb.maxX >= cMinX - 0.45 && sb.minZ <= cMaxZ + 0.45 && sb.maxZ >= cMinZ - 0.45) {
+            clusterInteriorPolys.push(poly)
+          }
+        }
+        for (const zp of indoorZonePolys) {
+          const zb = polygonBounds2D(zp)
+          if (zb.minX <= cMaxX + 0.45 && zb.maxX >= cMinX - 0.45 && zb.minZ <= cMaxZ + 0.45 && zb.maxZ >= cMinZ - 0.45) {
+            clusterInteriorPolys.push(zp)
+          }
+        }
+
+        const tolPerim = 0.45
+        let maxPerimH = 0
+        let maxClusterH = 0
+        for (const w of clusterWalls) {
+          const wh = typeof w.height === 'number' && Number.isFinite(w.height) && w.height > 1.2 ? w.height : defaultWallHeightM
+          if (wh > maxClusterH) maxClusterH = wh
+          const mx = (Number(w.start![0]) + Number(w.end![0])) / 2
+          const mz = (Number(w.start![1]) + Number(w.end![1])) / 2
+          const isPerim =
+            w.frontSide === 'exterior' ||
+            w.backSide === 'exterior' ||
+            Math.abs(mx - cMinX) <= tolPerim ||
+            Math.abs(mx - cMaxX) <= tolPerim ||
+            Math.abs(mz - cMinZ) <= tolPerim ||
+            Math.abs(mz - cMaxZ) <= tolPerim
+          if (isPerim && wh > maxPerimH) maxPerimH = wh
+        }
+        const roofSeatH = maxPerimH > 1.5 ? maxPerimH : maxClusterH > 1.5 ? maxClusterH : defaultWallHeightM
+
+        const spanX = cMaxX - cMinX
+        const spanZ = cMaxZ - cMinZ
+        if (spanX <= 1.5 || spanZ <= 1.5) continue
+
+        const hasFootprintClip = clusterInteriorPolys.length > 0 || clusterWallSegs.length >= 3
+        const isInsideClusterFootprint = (x: number, z: number, marginM = 0): boolean => {
+          if (!hasFootprintClip) return true
+          if (clusterInteriorPolys.some((p) => pointInPolygon2D(x, z, p, 0.02))) return true
+          if (clusterWallSegs.length >= 3 && isPointEnclosedByWalls(x, z, clusterWallSegs)) return true
+          if (marginM > 0) {
+            for (const ws of clusterWallSegs) {
+              if (pointToSegmentDist2D(x, z, ws.ax, ws.az, ws.bx, ws.bz) <= marginM) return true
+            }
+            for (const p of clusterInteriorPolys) {
+              if (pointNearPolygonEdges2D(x, z, p, marginM)) return true
+            }
+          }
+          return false
+        }
+
+        // VIS-04: Commercial flat/low-slope roof deck with framed RTU curb opening (double trimmers + double headers)
+        const clusterRtus = levelRtus.filter(
+          (rtu) =>
+            Array.isArray(rtu.position) &&
+            rtu.position.length >= 3 &&
+            rtu.position[0] >= cMinX - 0.5 &&
+            rtu.position[0] <= cMaxX + 0.5 &&
+            rtu.position[2] >= cMinZ - 0.5 &&
+            rtu.position[2] <= cMaxZ + 0.5,
+        )
+        if (clusterRtus.length > 0) {
+          const deckBaseY = env.baseElevationM + roofSeatH
+          const flatDepthM = Math.min(spanX, spanZ) > 5.5 ? 0.2858 : 0.2413
+          const deckCenterY = deckBaseY + flatDepthM / 2
+          const flatSpacingM = 16 * INCHES_TO_METERS
+          const spanAlongX = spanX <= spanZ
+          const rotY = spanAlongX ? 0 : Math.PI / 2
+
+          // Build curb opening boxes in XZ around every RTU so zero roof joists slice through the RTU
+          const rtuOpenings = clusterRtus.map((rtu) => {
+            const p = rtu.position!
+            const rot = typeof rtu.rotation === 'number' && Number.isFinite(rtu.rotation) ? rtu.rotation : 0
+            const w = typeof rtu.widthM === 'number' && rtu.widthM > 0.2 ? rtu.widthM : 1.55
+            const d = typeof rtu.depthM === 'number' && rtu.depthM > 0.2 ? rtu.depthM : 1.15
+            const halfX = (Math.abs(w * Math.cos(rot)) + Math.abs(d * Math.sin(rot))) / 2 + 0.08
+            const halfZ = (Math.abs(w * Math.sin(rot)) + Math.abs(d * Math.cos(rot))) / 2 + 0.08
+            return {
+              minX: p[0] - halfX,
+              maxX: p[0] + halfX,
+              minZ: p[2] - halfZ,
+              maxZ: p[2] + halfZ,
+            }
+          })
+
+          // Perimeter rim joists seated on top of perimeter walls
+          for (const ws of clusterWallSegs) {
+            const ux = (ws.bx - ws.ax) / ws.len
+            const uz = (ws.bz - ws.az) / ws.len
+            const nx = -uz
+            const nz = ux
+            const eRotY = -Math.atan2(uz, ux)
+            pushWallBox('osb-web', ws.ax, ws.az, ux, uz, nx, nz, eRotY, ws.len / 2, deckCenterY, ws.len, flatDepthM, memberThickM)
+          }
+
+          // Flat roof joists clipped to enclosed footprint and split cleanly around every RTU curb opening
+          const runStart = spanAlongX ? cMinZ + flatSpacingM : cMinX + flatSpacingM
+          const runEnd = spanAlongX ? cMaxZ - 0.08 : cMaxX - 0.08
+          for (let pos = runStart; pos <= runEnd; pos += flatSpacingM) {
+            const segA: Vec3Tuple = spanAlongX ? [cMinX, deckCenterY, pos] : [pos, deckCenterY, cMinZ]
+            const segB: Vec3Tuple = spanAlongX ? [cMaxX, deckCenterY, pos] : [pos, deckCenterY, cMaxZ]
+            const fpSegs = clipSegmentToFootprint3D(segA, segB, (x, z) => isInsideClusterFootprint(x, z, 0.04), 0.25)
+
+            for (const fp of fpSegs) {
+              const s0 = spanAlongX ? Math.min(fp.start[0], fp.end[0]) : Math.min(fp.start[2], fp.end[2])
+              const s1 = spanAlongX ? Math.max(fp.start[0], fp.end[0]) : Math.max(fp.start[2], fp.end[2])
+              let intervals: Array<[number, number]> = [[s0, s1]]
+              for (const op of rtuOpenings) {
+                const oMinTrans = spanAlongX ? op.minZ : op.minX
+                const oMaxTrans = spanAlongX ? op.maxZ : op.maxX
+                const oMinSpan = spanAlongX ? op.minX : op.minZ
+                const oMaxSpan = spanAlongX ? op.maxX : op.maxZ
+                // Exclude joists whose centerline falls inside the opening or overlaps the double trimmers
+                if (pos > oMinTrans - memberThickM * 2.5 && pos < oMaxTrans + memberThickM * 2.5) {
+                  intervals = subtractInterval1D(intervals, oMinSpan - memberThickM * 2, oMaxSpan + memberThickM * 2)
+                }
+              }
+              for (const [a0, a1] of intervals) {
+                const jLen = a1 - a0 - memberThickM * 2
+                if (jLen < 0.2) continue
+                const mid = (a0 + a1) / 2
+                const cx = spanAlongX ? mid : pos
+                const cz = spanAlongX ? pos : mid
+                boxes.push({ bucket: 'lumber', center: [cx, deckCenterY, cz], size: [jLen, flatDepthM, memberThickM], rotY })
+                if (showConnectors) {
+                  const endOff = jLen / 2 - 0.02
+                  for (const dir of [-1, 1]) {
+                    const hx = spanAlongX ? cx + dir * endOff : cx
+                    const hz = spanAlongX ? cz : cz + dir * endOff
+                    boxes.push({ bucket: 'galv-steel', center: [hx, deckBaseY + 0.02, hz], size: [0.056, 0.14, 0.06], rotY })
+                  }
+                }
+              }
+            }
+          }
+
+          // Framed RTU curb openings: double trimmers (parallel to joists) + double headers (perpendicular) + curb frame
+          for (const op of rtuOpenings) {
+            const oMinTrans = spanAlongX ? op.minZ : op.minX
+            const oMaxTrans = spanAlongX ? op.maxZ : op.maxX
+            const oMinSpan = spanAlongX ? op.minX : op.minZ
+            const oMaxSpan = spanAlongX ? op.maxX : op.maxZ
+            const headerLen = Math.max(0.25, oMaxTrans - oMinTrans)
+            const headerRotY = spanAlongX ? Math.PI / 2 : 0
+
+            // 1. Double trimmer joists along BOTH sides of the RTU opening (full span clipped to enclosed footprint)
+            for (const side of [
+              { edge: oMinTrans, dir: -1 },
+              { edge: oMaxTrans, dir: 1 },
+            ]) {
+              for (let ply = 0; ply < 2; ply++) {
+                const tPos = side.edge + side.dir * memberThickM * (ply + 0.5)
+                const tA: Vec3Tuple = spanAlongX ? [cMinX, deckCenterY, tPos] : [tPos, deckCenterY, cMinZ]
+                const tB: Vec3Tuple = spanAlongX ? [cMaxX, deckCenterY, tPos] : [tPos, deckCenterY, cMaxZ]
+                const tSegs = clipSegmentToFootprint3D(tA, tB, (x, z) => isInsideClusterFootprint(x, z, 0.04), 0.25)
+                for (const ts of tSegs) {
+                  const tLen = Math.hypot(ts.end[0] - ts.start[0], ts.end[2] - ts.start[2]) - memberThickM * 2
+                  if (tLen < 0.25) continue
+                  boxes.push({
+                    bucket: 'header-lvl',
+                    center: [(ts.start[0] + ts.end[0]) / 2, deckCenterY, (ts.start[2] + ts.end[2]) / 2],
+                    size: [tLen, flatDepthM, memberThickM],
+                    rotY,
+                  })
+                }
+              }
+            }
+
+            // 2. Double header joists across BOTH ends of the RTU opening (between inner faces of double trimmers)
+            const transMid = (oMinTrans + oMaxTrans) / 2
+            for (const end of [
+              { edge: oMinSpan, dir: -1 },
+              { edge: oMaxSpan, dir: 1 },
+            ]) {
+              for (let ply = 0; ply < 2; ply++) {
+                const hPos = end.edge + end.dir * memberThickM * (ply + 0.5)
+                const cx = spanAlongX ? hPos : transMid
+                const cz = spanAlongX ? transMid : hPos
+                boxes.push({
+                  bucket: 'header-lvl',
+                  center: [cx, deckCenterY, cz],
+                  size: [headerLen, flatDepthM, memberThickM],
+                  rotY: headerRotY,
+                })
+              }
+              // Galvanized heavy header hangers at trimmer connections
+              if (showConnectors) {
+                for (const tEdge of [oMinTrans + 0.02, oMaxTrans - 0.02]) {
+                  const hx = spanAlongX ? end.edge + end.dir * memberThickM : tEdge
+                  const hz = spanAlongX ? tEdge : end.edge + end.dir * memberThickM
+                  boxes.push({
+                    bucket: 'galv-steel',
+                    center: [hx, deckCenterY, hz],
+                    size: [0.06, flatDepthM * 0.85, 0.09],
+                    rotY: headerRotY,
+                  })
+                }
+              }
+            }
+
+            // 3. Raised PT roof curb frame sitting cleanly on top of the framed opening perimeter
+            const curbH = 0.14
+            const curbY = deckBaseY + flatDepthM + curbH / 2
+            const curbSpanX = op.maxX - op.minX
+            const curbSpanZ = op.maxZ - op.minZ
+            boxes.push({ bucket: 'pt-sill', center: [(op.minX + op.maxX) / 2, curbY, op.minZ - memberThickM / 2], size: [curbSpanX + memberThickM * 2, curbH, memberThickM] })
+            boxes.push({ bucket: 'pt-sill', center: [(op.minX + op.maxX) / 2, curbY, op.maxZ + memberThickM / 2], size: [curbSpanX + memberThickM * 2, curbH, memberThickM] })
+            boxes.push({ bucket: 'pt-sill', center: [op.minX - memberThickM / 2, curbY, (op.minZ + op.maxZ) / 2], size: [memberThickM, curbH, curbSpanZ] })
+            boxes.push({ bucket: 'pt-sill', center: [op.maxX + memberThickM / 2, curbY, (op.minZ + op.maxZ) / 2], size: [memberThickM, curbH, curbSpanZ] })
+          }
+          continue
+        }
+
+        const ridgeAlongX = spanX >= spanZ
+        roofSegments.push({
+          cx: (cMinX + cMaxX) / 2,
+          cy: env.baseElevationM + roofSeatH,
+          cz: (cMinZ + cMaxZ) / 2,
+          yaw: ridgeAlongX ? 0 : Math.PI / 2,
+          roofType: 'gable',
+          widthM: ridgeAlongX ? spanX : spanZ,
+          depthM: ridgeAlongX ? spanZ : spanX,
+          pitchRad: Math.atan(6 / 12),
+          overhangM: 0.4,
+          wallHeightM: 0,
+          footprintClip: hasFootprintClip ? isInsideClusterFootprint : undefined,
+        })
+      }
+    }
 
     for (let segIdx = 0; segIdx < roofSegments.length; segIdx++) {
       const seg = roofSegments[segIdx]!
@@ -1022,23 +1669,38 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         return perpDist <= 0.6 && alongDist <= Math.max(seg.widthM * 0.6, 1.5)
       })
       if (!isTruss && showBeams && !hasPersistedRidge) {
-        const rLen = Math.hypot(
-          ridgeClip.end[0] - ridgeClip.start[0],
-          ridgeClip.end[1] - ridgeClip.start[1],
-          ridgeClip.end[2] - ridgeClip.start[2],
-        )
-        if (rLen > 0.12) {
-          boxes.push({
-            bucket: 'header-lvl',
-            center: ridgeCenterWorld,
-            size: [rLen, 0.24, 0.089],
-            rotY: seg.yaw,
-          })
+        const ridgeParts = seg.footprintClip
+          ? clipSegmentToFootprint3D(
+              ridgeClip.start,
+              ridgeClip.end,
+              (x, z) => seg.footprintClip!(x, z, 0.25),
+              0.12,
+            )
+          : [{ start: ridgeClip.start, end: ridgeClip.end }]
+        for (const rp of ridgeParts) {
+          const rLen = Math.hypot(
+            rp.end[0] - rp.start[0],
+            rp.end[1] - rp.start[1],
+            rp.end[2] - rp.start[2],
+          )
+          if (rLen > 0.12) {
+            boxes.push({
+              bucket: 'header-lvl',
+              center: [
+                (rp.start[0] + rp.end[0]) / 2,
+                (rp.start[1] + rp.end[1]) / 2 - 0.09,
+                (rp.start[2] + rp.end[2]) / 2,
+              ],
+              size: [rLen, 0.24, 0.089],
+              rotY: seg.yaw,
+            })
+          }
         }
       }
 
       const valleyPtsN: Vec3Tuple[] = []
       const valleyPtsS: Vec3Tuple[] = []
+      const fpClip = seg.footprintClip
 
       const count = Math.max(2, Math.floor(seg.widthM / rafterSpacingM) + 1)
       for (let i = 0; i < count; i++) {
@@ -1056,19 +1718,32 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         const pWallN = toWorld(lx, 0.06, -halfRun)
         const pWallS = toWorld(lx, 0.06, halfRun)
 
-        // North (-Z) and South (+Z) sloped rafters / valley jack rafters (clipped cleanly on host roof planes!)
+        // North (-Z) and South (+Z) sloped rafters / valley jack rafters (clipped to host roof planes AND fallback enclosed footprint!)
         const clipN = clipSegmentAboveHosts(pPeakN, pEaveN, hostRoofs, 0.015)
         const clipS = clipSegmentAboveHosts(pPeakS, pEaveS, hostRoofs, 0.015)
-        if (clipN) {
-          pushStrut('lumber', clipN.start, clipN.end, chordDepthM, memberThickM, ridgeAxisWorld)
-          if (isOverFramed && clipN.clippedEnd) valleyPtsN.push(clipN.end)
-        }
-        if (clipS) {
-          pushStrut('lumber', clipS.start, clipS.end, chordDepthM, memberThickM, ridgeAxisWorld)
-          if (isOverFramed && clipS.clippedEnd) valleyPtsS.push(clipS.end)
+        const emitFootprintClipped = (
+          clip: { start: Vec3Tuple; end: Vec3Tuple; clippedEnd: boolean } | null,
+          depthM: number,
+          marginM: number,
+          valleyPts?: Vec3Tuple[],
+        ): boolean => {
+          if (!clip) return false
+          if (!fpClip) {
+            pushStrut('lumber', clip.start, clip.end, depthM, memberThickM, ridgeAxisWorld)
+            if (valleyPts && isOverFramed && clip.clippedEnd) valleyPts.push(clip.end)
+            return true
+          }
+          const subSegs = clipSegmentToFootprint3D(clip.start, clip.end, (x, z) => fpClip(x, z, marginM), 0.14)
+          for (const ss of subSegs) {
+            pushStrut('lumber', ss.start, ss.end, depthM, memberThickM, ridgeAxisWorld)
+          }
+          return subSegs.length > 0
         }
 
-        // Ceiling joist / bottom truss chord (omit when buried inside an over-framed host roof cavity!)
+        const emittedN = emitFootprintClipped(clipN, chordDepthM, seg.overhangM, valleyPtsN)
+        const emittedS = emitFootprintClipped(clipS, chordDepthM, seg.overhangM, valleyPtsS)
+
+        // Ceiling joist / bottom truss chord (omit when buried inside an over-framed host roof cavity; clip to enclosed footprint on fallback!)
         const ceilingAboveHosts =
           !isOverFramed ||
           (isPointAboveHosts(pWallN, 0.08) &&
@@ -1077,8 +1752,21 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         if (roofSystem !== 'ridge-beam-cathedral' && ceilingAboveHosts) {
           if (roofSystem === 'scissor-truss') {
             const scPeak = toWorld(lx, riseM * 0.45, 0)
-            pushStrut('lumber', pWallN, scPeak, 0.089, memberThickM, ridgeAxisWorld)
-            pushStrut('lumber', scPeak, pWallS, 0.089, memberThickM, ridgeAxisWorld)
+            if (fpClip) {
+              for (const ss of clipSegmentToFootprint3D(pWallN, scPeak, (x, z) => fpClip(x, z, 0.12), 0.14)) {
+                pushStrut('lumber', ss.start, ss.end, 0.089, memberThickM, ridgeAxisWorld)
+              }
+              for (const ss of clipSegmentToFootprint3D(scPeak, pWallS, (x, z) => fpClip(x, z, 0.12), 0.14)) {
+                pushStrut('lumber', ss.start, ss.end, 0.089, memberThickM, ridgeAxisWorld)
+              }
+            } else {
+              pushStrut('lumber', pWallN, scPeak, 0.089, memberThickM, ridgeAxisWorld)
+              pushStrut('lumber', scPeak, pWallS, 0.089, memberThickM, ridgeAxisWorld)
+            }
+          } else if (fpClip) {
+            for (const ss of clipSegmentToFootprint3D(pWallN, pWallS, (x, z) => fpClip(x, z, 0.12), 0.14)) {
+              pushStrut('lumber', ss.start, ss.end, 0.14, memberThickM, ridgeAxisWorld)
+            }
           } else {
             pushStrut('lumber', pWallN, pWallS, 0.14, memberThickM, ridgeAxisWorld)
           }
@@ -1096,7 +1784,14 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
           const pushClippedWeb = (a: readonly [number, number, number], b: readonly [number, number, number]) => {
             const c = clipSegmentAboveHosts(a, b, hostRoofs, 0.015)
-            if (c) pushStrut('lumber', c.start, c.end, 0.089, memberThickM, ridgeAxisWorld)
+            if (!c) return
+            if (fpClip) {
+              for (const ss of clipSegmentToFootprint3D(c.start, c.end, (x, z) => fpClip(x, z, 0.12), 0.14)) {
+                pushStrut('lumber', ss.start, ss.end, 0.089, memberThickM, ridgeAxisWorld)
+              }
+            } else {
+              pushStrut('lumber', c.start, c.end, 0.089, memberThickM, ridgeAxisWorld)
+            }
           }
 
           if (roofSystem === 'attic-truss') {
@@ -1114,34 +1809,41 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
             pushClippedWeb(pBotS, pMidS)
           }
 
-          // Galvanized steel truss gusset connector plates at Peak, Heels & Panel Points (only where above host roofs)
+          // Galvanized steel truss gusset connector plates at Peak, Heels & Panel Points (only where above host roofs & inside footprint)
           const pPeakPlate = toWorld(lx, riseM - 0.06, 0)
           const pHeelN = toWorld(lx, 0.07, -halfRun + 0.14)
           const pHeelS = toWorld(lx, 0.07, halfRun - 0.14)
-          if (isPointAboveHosts(pPeakPlate, 0.08)) {
+          const inFp = (pt: readonly [number, number, number]) => !fpClip || fpClip(pt[0], pt[2], 0.15)
+          if (isPointAboveHosts(pPeakPlate, 0.08) && inFp(pPeakPlate)) {
             boxes.push({ bucket: 'galv-steel', center: pPeakPlate, size: [0.048, 0.14, 0.22], rotY: seg.yaw })
           }
-          if (isPointAboveHosts(pHeelN, 0.08)) {
+          if (isPointAboveHosts(pHeelN, 0.08) && inFp(pHeelN)) {
             boxes.push({ bucket: 'galv-steel', center: pHeelN, size: [0.048, 0.10, 0.20], rotY: seg.yaw })
           }
-          if (isPointAboveHosts(pHeelS, 0.08)) {
+          if (isPointAboveHosts(pHeelS, 0.08) && inFp(pHeelS)) {
             boxes.push({ bucket: 'galv-steel', center: pHeelS, size: [0.048, 0.10, 0.20], rotY: seg.yaw })
           }
-          if (isPointAboveHosts(pBotN, 0.05)) {
+          if (isPointAboveHosts(pBotN, 0.05) && inFp(pBotN)) {
             boxes.push({ bucket: 'galv-steel', center: pBotN, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
           }
-          if (isPointAboveHosts(pBotS, 0.05)) {
+          if (isPointAboveHosts(pBotS, 0.05) && inFp(pBotS)) {
             boxes.push({ bucket: 'galv-steel', center: pBotS, size: [0.048, 0.11, 0.14], rotY: seg.yaw })
           }
         } else if (roofSystem === 'stick-rafter' && i % 2 === 0 && halfRun > 1.2) {
-          // Upper-third collar tie per IRC R802.4.6 (only emit when fully clear above host roof)
+          // Upper-third collar tie per IRC R802.4.6 (only emit when fully clear above host roof & inside enclosed footprint)
           const tieZ = halfRun * 0.34
           const tieY = riseM * 0.66
           const tieA = toWorld(lx, tieY, -tieZ)
           const tieB = toWorld(lx, tieY, tieZ)
           const tieClip = clipSegmentAboveHosts(tieA, tieB, hostRoofs, 0.015)
           if (tieClip && !tieClip.clippedStart && !tieClip.clippedEnd) {
-            pushStrut('lumber', tieClip.start, tieClip.end, 0.089, memberThickM, ridgeAxisWorld)
+            if (fpClip) {
+              for (const ss of clipSegmentToFootprint3D(tieClip.start, tieClip.end, (x, z) => fpClip(x, z, 0.12), 0.14)) {
+                pushStrut('lumber', ss.start, ss.end, 0.089, memberThickM, ridgeAxisWorld)
+              }
+            } else {
+              pushStrut('lumber', tieClip.start, tieClip.end, 0.089, memberThickM, ridgeAxisWorld)
+            }
           }
         }
 
@@ -1151,6 +1853,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           for (let gz = -halfRun + gableStep; gz < halfRun - 0.15; gz += gableStep) {
             const studTopY = riseM * (1 - Math.abs(gz) / halfRun) - 0.06
             const studTopWorld = toWorld(lx, studTopY, gz)
+            if (fpClip && !fpClip(studTopWorld[0], studTopWorld[2], 0.15)) continue
             const hostY = isOverFramed ? hostSurfaceYAt(studTopWorld[0], studTopWorld[2], hostRoofs) : null
             // If this gable end sits mid-slope above the host roof (interior valley termination), do NOT block the attic throat!
             // Keep exterior flush gable ends where hostY is null or sits right at eave/plate level (hostY <= seg.cy + 0.12).
@@ -1162,14 +1865,24 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           }
         }
 
-        // Distributed H2.5A / H10A Galvanized Hurricane Ties at wall bearing seats (skip mid-roof valley terminations!)
+        // Distributed H2.5A / H10A Galvanized Hurricane Ties at wall bearing seats (skip mid-roof valley terminations & unenclosed cutouts!)
         if (showConnectors) {
           const pTieN = toWorld(lx, 0.02, -halfRun + 0.04)
           const pTieS = toWorld(lx, 0.02, halfRun - 0.04)
-          if (clipN && (!isOverFramed || (!clipN.clippedEnd && isPointAboveHosts(pTieN, 0.06)))) {
+          if (
+            emittedN &&
+            clipN &&
+            (!fpClip || fpClip(pTieN[0], pTieN[2], 0.25)) &&
+            (!isOverFramed || (!clipN.clippedEnd && isPointAboveHosts(pTieN, 0.06)))
+          ) {
             boxes.push({ bucket: 'galv-steel', center: pTieN, size: [0.058, 0.14, 0.06], rotY: seg.yaw })
           }
-          if (clipS && (!isOverFramed || (!clipS.clippedEnd && isPointAboveHosts(pTieS, 0.06)))) {
+          if (
+            emittedS &&
+            clipS &&
+            (!fpClip || fpClip(pTieS[0], pTieS[2], 0.25)) &&
+            (!isOverFramed || (!clipS.clippedEnd && isPointAboveHosts(pTieS, 0.06)))
+          ) {
             boxes.push({ bucket: 'galv-steel', center: pTieS, size: [0.058, 0.14, 0.06], rotY: seg.yaw })
           }
         }

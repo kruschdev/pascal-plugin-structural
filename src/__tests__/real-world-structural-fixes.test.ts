@@ -227,13 +227,28 @@ describe('Real-World Public Pascal Structural Regression Suite (REAL-STR-01..04)
       working = mergeCreated(working, res.createdNodes ?? [])
     }
 
-    // Audit MUST pass with 0 fire-blocking / draftstop mismatches from the unwalled lvl2_deck
-    const audit = auditStructuralScene(working)
+    // Audit MUST suppress open roof-deck floor/attic draftstops (R302.12 / R302.12.1) on unwalled lvl2_deck
+    // while STILL auditing IRC R302.11(3) stair-stringer fire blocking on lvl2_deck (STR-BUG-04)!
+    const auditBeforeDeckStairFs = auditStructuralScene(working)
+    expect(
+      auditBeforeDeckStairFs.findings.some(
+        (f) => f.category === 'fire-blocking' && (f.codeRef === 'IRC R302.12' || f.codeRef === 'IRC R302.12.1'),
+      ),
+    ).toBe(false)
+    expect(
+      auditBeforeDeckStairFs.findings.some((f) => f.category === 'fire-blocking' && f.codeRef === 'IRC R302.11(3)'),
+    ).toBe(true)
+
+    // Once the unwalled roof deck's stair stringers are fire-blocked (or when deck has no stairs), audit passes with 0 errors
+    const noDeckStairs = { ...working }
+    delete noDeckStairs.stair_deck1
+    delete noDeckStairs.stair_deck2
+    const audit = auditStructuralScene(noDeckStairs)
     expect(audit.findings.filter((f) => f.category === 'fire-blocking')).toHaveLength(0)
     expect(audit.passed).toBe(true)
 
     // Negative parity check: removing a stair firestop from walled lvl1 MUST still be flagged!
-    const missingL1StairFs = { ...working }
+    const missingL1StairFs = { ...noDeckStairs }
     for (const [id, n] of Object.entries(missingL1StairFs)) {
       if (n.type === 'structural:firestop' && n.parentId === 'lvl1' && n.firestopKind === 'stair-stringer') {
         delete missingL1StairFs[id]

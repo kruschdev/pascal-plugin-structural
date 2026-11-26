@@ -35,8 +35,13 @@ import {
   type Vec3,
   type WallOverrideRule,
   belongsToLevel,
+  findLevelCommercialRtus,
   getConnectorBySku,
   isHighestWalledLevelInBuilding,
+  isHoldDownConnector,
+  levelSortOrder,
+  resolveHoldDownUpliftLbs,
+  resolveNodeLevelId,
 } from './tables'
 
 export type AutopopulateStructuralOptions = {
@@ -113,6 +118,35 @@ export function autopopulateStructuralScene(
   const includeRoof = options.includeRoof ?? (roofs.length > 0 || isHighestWalledLevelInBuilding(nodes, levelId))
   const includeFoundation = options.includeFoundation ?? true
   const includeFireblocking = options.includeFireblocking ?? true
+  const levelCommercialRtus = findLevelCommercialRtus(nodes, levelId)
+
+  const findAlignedLowerColumn = (px: number, pz: number, colBottomY: number): SceneNodeLike | undefined => {
+    const currentLevelNode = levelId ? nodes[levelId] : undefined
+    const currentLevelOrder = currentLevelNode?.type === 'level' ? levelSortOrder(currentLevelNode) : null
+    const targetBuildingId =
+      currentLevelNode?.type === 'level' && typeof currentLevelNode.parentId === 'string'
+        ? currentLevelNode.parentId
+        : null
+
+    return Object.values(nodes).find((n) => {
+      if (n.type !== 'structural:column') return false
+      if (levelId && belongsToLevel(nodes, n, levelId)) return false
+      const nLvlId = resolveNodeLevelId(nodes, n)
+      const nLvlNode = nLvlId ? nodes[nLvlId] : undefined
+      if (targetBuildingId && nLvlNode?.type === 'level') {
+        const nBuildingId = typeof nLvlNode.parentId === 'string' ? nLvlNode.parentId : null
+        if (nBuildingId && nBuildingId !== targetBuildingId) return false
+      }
+      const p = n.position ?? [0, 0, 0]
+      if (Math.hypot(p[0] - px, p[2] - pz) > 0.45) return false
+      if (currentLevelOrder !== null && nLvlNode?.type === 'level') {
+        const nOrder = levelSortOrder(nLvlNode)
+        if (nOrder > currentLevelOrder) return false
+        if (nOrder < currentLevelOrder) return true
+      }
+      return p[1] < colBottomY - 0.1
+    })
+  }
 
   const createdNodes: SceneNodeLike[] = []
   let seq = 1
@@ -534,12 +568,14 @@ export function autopopulateStructuralScene(
         const colId = nextId('strcol')
         const leftBayId = bayGirderIds[p - 1] ?? firstGirderId
         const rightBayId = bayGirderIds[p]
+        const colBottomY = Number((cluster.baseElevationM - cluster.avgWallHeightM).toFixed(3))
+        const lowerCol = includeFoundation ? undefined : findAlignedLowerColumn(px, pz, colBottomY)
         createdNodes.push({
           id: colId,
           type: 'structural:column',
           name: `Girder Post #${p} (${colSizing.entry.designation})`,
           parentId: levelId,
-          position: [Number(px.toFixed(3)), Number((cluster.baseElevationM - cluster.avgWallHeightM).toFixed(3)), Number(pz.toFixed(3))],
+          position: [Number(px.toFixed(3)), colBottomY, Number(pz.toFixed(3))],
           heightM: Number(Math.max(0.8, cluster.avgWallHeightM - girderCheck.entry.depthIn * INCHES_TO_METERS).toFixed(3)),
           columnType: colSizing.entry.columnType,
           designation: colSizing.entry.designation,
@@ -547,7 +583,7 @@ export function autopopulateStructuralScene(
           depthIn: colSizing.entry.depthIn,
           axialLoadLbs: colAxialLbs,
           transfersFromNodeId: leftBayId,
-          transfersToNodeId: includeFoundation ? `footing_${colId}` : undefined,
+          transfersToNodeId: includeFoundation ? `footing_${colId}` : lowerCol?.id,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? colSizing.footingWidthIn : 0,
           footingDepthIn: includeFoundation ? colSizing.footingDepthIn : 0,
@@ -598,7 +634,7 @@ export function autopopulateStructuralScene(
           const colH = typeof c.heightM === 'number' ? c.heightM : 2.74
           const colTopY = p[1] + colH
           const planMatch = Math.hypot(p[0] - pt[0], p[2] - pt[1]) <= 0.45
-          const verticalMatch = p[1] <= girderBottomY + 0.35 && colTopY >= girderBottomY - 0.55
+          const verticalMatch = p[1] <= girderBottomY - 0.25 && colTopY >= girderBottomY - 0.55
           return planMatch && verticalMatch
         })
       }
@@ -618,6 +654,8 @@ export function autopopulateStructuralScene(
       ] as const) {
         if (isGirderEndSupported(pt)) continue
         const colId = nextId('strcol')
+        const endColBottomY = Number((cluster.baseElevationM - cluster.avgWallHeightM).toFixed(3))
+        const lowerCol = includeFoundation ? undefined : findAlignedLowerColumn(pt[0], pt[1], endColBottomY)
         createdNodes.push({
           id: colId,
           type: 'structural:column',
@@ -625,7 +663,7 @@ export function autopopulateStructuralScene(
           parentId: levelId,
           position: [
             Number(pt[0].toFixed(3)),
-            Number((cluster.baseElevationM - cluster.avgWallHeightM).toFixed(3)),
+            endColBottomY,
             Number(pt[1].toFixed(3)),
           ],
           heightM: Number(Math.max(0.8, cluster.avgWallHeightM - girderDepthM).toFixed(3)),
@@ -635,7 +673,7 @@ export function autopopulateStructuralScene(
           depthIn: endColSizing.entry.depthIn,
           axialLoadLbs: endAxialLbs,
           transfersFromNodeId: attachedBayId,
-          transfersToNodeId: includeFoundation ? `footing_${colId}` : undefined,
+          transfersToNodeId: includeFoundation ? `footing_${colId}` : lowerCol?.id,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? endColSizing.footingWidthIn : 0,
           footingDepthIn: includeFoundation ? endColSizing.footingDepthIn : 0,
@@ -660,8 +698,19 @@ export function autopopulateStructuralScene(
   }
 
   // 6. Roof Structural Ridge Beam (if cathedral or pitch < 3:12, per connected cluster!) + Hurricane Ties & Gable Angles
+  // Skip residential pitched ridge beams on commercial flat-deck roofs hosting a rooftop package unit (RTU) with 0 pitched roofs.
   if (includeRoof) {
     for (const cluster of footprintClusters) {
+      const clusterHasCommercialRtu = levelCommercialRtus.some(
+        (rtu) =>
+          Array.isArray(rtu.position) &&
+          rtu.position.length >= 3 &&
+          rtu.position[0] >= cluster.minX - 0.5 &&
+          rtu.position[0] <= cluster.maxX + 0.5 &&
+          rtu.position[2] >= cluster.minZ - 0.5 &&
+          rtu.position[2] <= cluster.maxZ + 0.5,
+      )
+      if (clusterHasCommercialRtu && roofs.length === 0) continue
       const cShortFt = Math.max(6, Math.min(cluster.widthM, cluster.depthM) * METERS_TO_FEET)
       const cLongFt = Math.max(6, Math.max(cluster.widthM, cluster.depthM) * METERS_TO_FEET)
       const cRoofSizing = sizeRoofSystem({
@@ -764,6 +813,7 @@ export function autopopulateStructuralScene(
         const leftRidgeId = p > 0 ? ridgeBayIds[p - 1] : undefined
         const rightRidgeId = p < ridgeBays ? ridgeBayIds[p] : undefined
         const attachedRidgeIds = [leftRidgeId, rightRidgeId].filter((id): id is string => Boolean(id))
+        const lowerCol = includeFoundation ? undefined : findAlignedLowerColumn(pt[0], pt[1], cluster.baseElevationM)
 
         createdNodes.push({
           id: colId,
@@ -778,7 +828,7 @@ export function autopopulateStructuralScene(
           depthIn: postSizing.entry.depthIn,
           axialLoadLbs: postAxialLbs,
           transfersFromNodeId: attachedRidgeIds[0],
-          transfersToNodeId: includeFoundation ? `footing_${colId}` : undefined,
+          transfersToNodeId: includeFoundation ? `footing_${colId}` : lowerCol?.id,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
           footingWidthIn: includeFoundation ? postSizing.footingWidthIn : 0,
           footingDepthIn: includeFoundation ? postSizing.footingDepthIn : 0,
@@ -848,17 +898,36 @@ export function autopopulateStructuralScene(
   }
 
   for (const bwl of bwlReports) {
-    const hdSku =
+    const rawHdSku =
       bwl.requiredHoldDownSku ??
       (!bwl.passes ? (bwl.bracingMethod === 'CS-PF' ? 'STHD14' : 'HDU5-SDS2.5') : null)
+    const requiredUpliftLbs =
+      typeof bwl.overturningUpliftLbs === 'number' && bwl.overturningUpliftLbs > 0
+        ? bwl.overturningUpliftLbs
+        : rawHdSku
+          ? (getConnectorBySku(rawHdSku)?.upliftLbs ?? 0)
+          : 0
+    // On upper wood stories (includeFoundation === false), substitute wood-to-wood HDU4/HDU5-SDS2.5 instead of concrete-embedded STHD14
+    const hdSku =
+      rawHdSku === 'STHD14' && !includeFoundation
+        ? requiredUpliftLbs <= 4565
+          ? 'HDU4-SDS2.5'
+          : 'HDU5-SDS2.5'
+        : rawHdSku
     const bwlWallSet = new Set(bwl.wallIds)
-    const alreadyHasHoldDown = levelNodes.some(
-      (n) =>
-        n.type === 'structural:connector' &&
-        (n.category === 'hold-down' || /^(STHD|HDU|HTT)/i.test(String(n.sku ?? ''))) &&
-        Array.isArray(n.attachedNodeIds) &&
-        n.attachedNodeIds.some((id) => typeof id === 'string' && bwlWallSet.has(id)),
-    )
+    const existingQualifyingQty = levelNodes
+      .filter(
+        (n) =>
+          isHoldDownConnector(n) &&
+          Array.isArray(n.attachedNodeIds) &&
+          n.attachedNodeIds.some((id) => typeof id === 'string' && bwlWallSet.has(id)) &&
+          resolveHoldDownUpliftLbs(n) >= requiredUpliftLbs,
+      )
+      .reduce((sum, n) => {
+        const qty = typeof n.quantity === 'number' && Number.isFinite(n.quantity) && n.quantity > 0 ? n.quantity : 1
+        return sum + qty
+      }, 0)
+    const alreadyHasHoldDown = existingQualifyingQty >= 2
     if (hdSku && !alreadyHasHoldDown) {
       const hdPos: Vec3 =
         bwl.axis === 'X' ? [minX + 0.15, levelBaseY, bwl.offsetM] : [bwl.offsetM, levelBaseY, minZ + 0.15]
@@ -869,13 +938,15 @@ export function autopopulateStructuralScene(
         attachedNodeIds: [...bwl.wallIds, assemblyId],
         name: `${hdSku} ${bwl.bracingMethod} Hold-Downs (${bwl.id}, x2 ends)`,
       })
-      emitConnector({
-        sku: 'SSTB16',
-        position: hdPos,
-        quantity: 2,
-        attachedNodeIds: [...bwl.wallIds, assemblyId],
-        name: `SSTB16 Hold-Down Anchor Bolts (${bwl.id}, x2)`,
-      })
+      if (includeFoundation) {
+        emitConnector({
+          sku: 'SSTB16',
+          position: hdPos,
+          quantity: 2,
+          attachedNodeIds: [...bwl.wallIds, assemblyId],
+          name: `SSTB16 Hold-Down Anchor Bolts (${bwl.id}, x2)`,
+        })
+      }
       if (!bwl.passes && bwl.bracingMethod === 'CS-PF') {
         emitConnector({
           sku: 'CS-PF',

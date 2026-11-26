@@ -13,6 +13,8 @@ import {
   type Vec2,
   belongsToLevel,
   getRequiredBracedWallPercent,
+  isHoldDownConnector,
+  resolveHoldDownUpliftLbs,
   resolveNodeLevelId,
   sameLevelOrUnscoped,
 } from './tables'
@@ -28,6 +30,7 @@ export type BracedWallLineReport = {
   requiredPercent: number
   passes: boolean
   bracingMethod: 'WSP' | 'CS-WSP' | 'CS-PF' | 'Engineered-Shear'
+  overturningUpliftLbs?: number
   requiredHoldDownSku: string | null
   requiresPlateWashers: boolean
   edgeNailSpacingIn: 2 | 3 | 4 | 6
@@ -114,6 +117,8 @@ export function evaluateBracedWallLines(params: {
     projMinM: number
     projMaxM: number
     lenM: number
+    wallHeightM: number
+    maxSolidPierM: number
     wspIntervalsM: Array<[number, number]>
     portalIntervalsM: Array<[number, number]>
   }
@@ -169,6 +174,7 @@ export function evaluateBracedWallLines(params: {
             })
             .map(toProjInterval)
         : []
+    const maxSolidPierM = solidRanges.reduce((max, [u0, u1]) => Math.max(max, u1 - u0), 0)
     entries.push({
       wall: w,
       levelKey: resolveNodeLevelId(params.nodes, w) ?? 'default',
@@ -177,16 +183,14 @@ export function evaluateBracedWallLines(params: {
       projMinM,
       projMaxM,
       lenM,
+      wallHeightM,
+      maxSolidPierM,
       wspIntervalsM,
       portalIntervalsM,
     })
   }
 
-  const holdDownConnectors = all.filter((n) => {
-    if (n.type !== 'structural:connector') return false
-    const sku = typeof n.sku === 'string' ? n.sku.toUpperCase() : ''
-    return n.category === 'hold-down' || /^(STHD|HDU|HTT)/.test(sku)
-  })
+  const holdDownConnectors = all.filter((n) => isHoldDownConnector(n))
 
   const reports: BracedWallLineReport[] = []
   const TOL_M = 1.2192 // exact 4 ft per IRC R602.10.1.1
@@ -208,6 +212,12 @@ export function evaluateBracedWallLines(params: {
         }
       }
 
+      const axisReports: Array<{
+        report: BracedWallLineReport
+        minProj: number
+        maxProj: number
+        hasExteriorWall: boolean
+      }> = []
       clusters.forEach((cluster, idx) => {
         // IRC R602.10.1.2: BWL length is axis-projected out-to-out distance between extreme ends
         const minProj = cluster.reduce((m, e) => Math.min(m, e.projMinM), Number.POSITIVE_INFINITY)
@@ -237,16 +247,7 @@ export function evaluateBracedWallLines(params: {
         const providedPercent = totalFt > 0 ? Math.min(100, Math.round((bracedFt / totalFt) * 100)) : 0
         const prescriptivePasses = providedPercent >= requiredPercent
 
-        // Credit engineered shear wall / CS-PF portal frame remediation when hold-down hardware (STHD/HDU/HTT) is anchored to this BWL
-        const clusterWallIds = new Set(cluster.map((e) => e.wall.id))
-        const matchedHoldDown = holdDownConnectors.find((hdNode) => {
-          if (!sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, hdNode), targetLevel)) return false
-          if (!Array.isArray(hdNode.attachedNodeIds)) return false
-          return hdNode.attachedNodeIds.some((id) => typeof id === 'string' && clusterWallIds.has(id))
-        })
-        const remediatedByHoldDown = !prescriptivePasses && Boolean(matchedHoldDown)
-        const passes = prescriptivePasses || remediatedByHoldDown
-
+        // Resolve bracing method and overturning uplift demand BEFORE evaluating hold-down remediation credit
         let bracingMethod: BracedWallLineReport['bracingMethod'] = 'WSP'
         if (usesPortal) {
           bracingMethod = 'CS-PF'
@@ -268,6 +269,35 @@ export function evaluateBracedWallLines(params: {
                 : 0
 
         const hd = overturningUpliftLbs > 0 ? selectHoldDownSku(overturningUpliftLbs) : null
+
+        // Require a viable continuous solid shear pier (IRC R602.10.6.4 >= 16" CS-PF or AWC SDPWS H/3.5 max aspect ratio),
+        // catalog-verified uplift capacity >= overturningUpliftLbs, and dual-end hold-down quantity >= 2.
+        const hasViableShearPier =
+          bracingMethod === 'CS-PF'
+            ? cluster.some((e) => e.maxSolidPierM >= 0.4064 - 1e-4)
+            : cluster.some((e) => e.maxSolidPierM >= e.wallHeightM / 3.5 - 1e-4)
+
+        const clusterWallIds = new Set(cluster.map((e) => e.wall.id))
+        const qualifyingHoldDowns = holdDownConnectors.filter((hdNode) => {
+          if (!sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, hdNode), targetLevel)) return false
+          if (!Array.isArray(hdNode.attachedNodeIds)) return false
+          if (!hdNode.attachedNodeIds.some((id) => typeof id === 'string' && clusterWallIds.has(id))) return false
+          return resolveHoldDownUpliftLbs(hdNode) >= overturningUpliftLbs
+        })
+        const qualifyingHoldDownQty = qualifyingHoldDowns.reduce((sum, hdNode) => {
+          const qty =
+            typeof hdNode.quantity === 'number' && Number.isFinite(hdNode.quantity) && hdNode.quantity > 0
+              ? hdNode.quantity
+              : 1
+          return sum + qty
+        }, 0)
+        const matchedHoldDown = qualifyingHoldDowns[0]
+        const remediatedByHoldDown =
+          !prescriptivePasses &&
+          hasViableShearPier &&
+          overturningUpliftLbs > 0 &&
+          qualifyingHoldDownQty >= 2
+        const passes = prescriptivePasses || remediatedByHoldDown
         const edgeNailSpacingIn: 2 | 3 | 4 | 6 =
           bracingMethod === 'Engineered-Shear'
             ? design.storiesAbove >= 1
@@ -277,33 +307,76 @@ export function evaluateBracedWallLines(params: {
               ? 4
               : 6
 
-        reports.push({
-          id: levelKeys.length > 1 ? `BWL-${levelKey}-${axis}${idx + 1}` : `BWL-${axis}${idx + 1}`,
-          axis,
-          offsetM: Number(cluster[0]!.offsetM.toFixed(2)),
-          wallIds: cluster.map((e) => e.wall.id),
-          totalLineLengthFt: Number(totalFt.toFixed(1)),
-          bracedPanelLengthFt: Number(bracedFt.toFixed(1)),
-          providedPercent,
-          requiredPercent,
-          passes,
-          bracingMethod,
-          requiredHoldDownSku: hd?.sku ?? null,
-          requiresPlateWashers,
-          edgeNailSpacingIn,
-          codeRef:
-            bracingMethod === 'CS-PF'
-              ? 'IRC R602.10.6.4'
-              : bracingMethod === 'Engineered-Shear'
-                ? 'AWC SDPWS / IRC R602.10'
-                : 'IRC Table R602.10.3(1)/(3)',
-          note: prescriptivePasses
-            ? undefined
-            : remediatedByHoldDown
-              ? `Prescriptive bracing (${providedPercent}% < ${requiredPercent}%) remediated via ${bracingMethod} with ${String(matchedHoldDown?.sku ?? hd?.sku ?? 'STHD14')} hold-downs.`
-              : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}%; add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
+        const hasExteriorWall = cluster.some(
+          (e) => e.wall.frontSide === 'exterior' || e.wall.backSide === 'exterior',
+        )
+        axisReports.push({
+          minProj,
+          maxProj,
+          hasExteriorWall,
+          report: {
+            id: levelKeys.length > 1 ? `BWL-${levelKey}-${axis}${idx + 1}` : `BWL-${axis}${idx + 1}`,
+            axis,
+            offsetM: Number(cluster[0]!.offsetM.toFixed(2)),
+            wallIds: cluster.map((e) => e.wall.id),
+            totalLineLengthFt: Number(totalFt.toFixed(1)),
+            bracedPanelLengthFt: Number(bracedFt.toFixed(1)),
+            providedPercent,
+            requiredPercent,
+            passes,
+            bracingMethod,
+            overturningUpliftLbs,
+            requiredHoldDownSku: hd?.sku ?? null,
+            requiresPlateWashers,
+            edgeNailSpacingIn,
+            codeRef:
+              bracingMethod === 'CS-PF'
+                ? 'IRC R602.10.6.4'
+                : bracingMethod === 'Engineered-Shear'
+                  ? 'AWC SDPWS / IRC R602.10'
+                  : 'IRC Table R602.10.3(1)/(3)',
+            note: prescriptivePasses
+              ? undefined
+              : remediatedByHoldDown
+                ? `Prescriptive bracing (${providedPercent}% < ${requiredPercent}%) remediated via ${bracingMethod} with ${String(matchedHoldDown?.sku ?? hd?.sku ?? 'STHD14')} hold-downs (x${qualifyingHoldDownQty}, >= ${overturningUpliftLbs} lbs).`
+                : !hasViableShearPier
+                  ? `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}% and lacks a qualifying solid shear pier (>= 16" CS-PF or H/3.5 engineered shear).`
+                  : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}%; add CS-PF portal frame or engineered shear wall with >= 2 ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs (>= ${overturningUpliftLbs} lbs).`,
+          },
         })
       })
+
+      // IRC R602.10.1.3: Non-perimeter interior partition lines sitting strictly between overlapping passing
+      // parallel braced wall lines within max BWL spacing (60 ft / 18.29m SDC A-C; 35 ft / 10.67m high-lateral)
+      // are not independently required shear lines. Never waive stepped exterior walls or lines lacking
+      // overlapping passing parallel braced lines on both sides.
+      const maxBwlSpacingM = design.windMph >= 130 || requiresPlateWashers ? 10.67 : 18.29
+      const overlapsProj = (a: { minProj: number; maxProj: number }, b: { minProj: number; maxProj: number }) =>
+        Math.min(a.maxProj, b.maxProj) - Math.max(a.minProj, b.minProj) > 0.1
+      if (axisReports.length >= 3) {
+        for (let i = 1; i < axisReports.length - 1; i++) {
+          const item = axisReports[i]!
+          const rep = item.report
+          if (rep.passes || item.hasExteriorWall) continue
+          const prevPassing = axisReports
+            .slice(0, i)
+            .reverse()
+            .find((r) => r.report.passes && overlapsProj(r, item))
+          const nextPassing = axisReports.slice(i + 1).find((r) => r.report.passes && overlapsProj(r, item))
+          if (!prevPassing || !nextPassing) continue
+          const withinSpacing = Math.abs(nextPassing.report.offsetM - prevPassing.report.offsetM) <= maxBwlSpacingM
+          if (withinSpacing || rep.totalLineLengthFt < 4.0) {
+            item.report = {
+              ...rep,
+              passes: true,
+              overturningUpliftLbs: 0,
+              requiredHoldDownSku: null,
+              note: `Interior partition line within IRC R602.10.1.3 BWL spacing (${prevPassing.report.id} to ${nextPassing.report.id}).`,
+            }
+          }
+        }
+      }
+      reports.push(...axisReports.map((a) => a.report))
     }
   }
 
@@ -364,7 +437,7 @@ export function traceStructuralLoadPaths(params: {
         const colH = typeof c.heightM === 'number' ? c.heightM : 2.74
         const colTopY = p[1] + colH
         const planMatch = Math.hypot(p[0] - pt[0], p[2] - pt[1]) <= SUPPORT_TOL_M
-        const verticalMatch = p[1] <= beamBottomY + 0.35 && colTopY >= beamBottomY - 0.55
+        const verticalMatch = p[1] <= beamBottomY - 0.25 && colTopY >= beamBottomY - 0.55
         return planMatch && verticalMatch
       })
       if (col) {
@@ -464,7 +537,7 @@ export function traceStructuralLoadPaths(params: {
   const hasStructure = assemblies.length > 0 || beams.length > 0 || columns.length > 0 || walls.length > 0
   const hasRoofTies = connectors.some((c) => c.category === 'hurricane-tie')
   const hasStraps = connectors.some((c) => c.category === 'tension-strap' || c.category === 'framing-angle')
-  const hasHoldDowns = connectors.some((c) => c.category === 'hold-down')
+  const hasHoldDowns = connectors.some((c) => isHoldDownConnector(c))
 
   if (design.windMph >= 115 && !hasRoofTies && assemblies.length > 0) {
     upliftFindings.push(`Wind ${design.windMph} mph requires roof-to-wall hurricane ties (H2.5A/H10A, IRC R802.11).`)

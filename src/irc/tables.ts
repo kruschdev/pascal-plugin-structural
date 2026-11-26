@@ -912,6 +912,120 @@ export function getConnectorBySku(sku: string): ConnectorCatalogEntry | undefine
   return CONNECTOR_CATALOG.find((c) => c.sku === sku)
 }
 
+/**
+ * Resolve the catalog entry for a structural connector node using case-insensitive SKU matching.
+ */
+function lookupConnectorCatalogForNode(node: SceneNodeLike): ConnectorCatalogEntry | undefined {
+  const sku = typeof node.sku === 'string' ? node.sku.trim() : ''
+  if (!sku) return undefined
+  const upper = sku.toUpperCase()
+  return CONNECTOR_CATALOG.find((c) => c.sku.toUpperCase() === upper)
+}
+
+/**
+ * Canonical catalog-backed predicate identifying hold-down connectors (`HDU*`, `STHD14`,
+ * or custom `category === 'hold-down'` nodes). Ensures consistent hold-down detection across
+ * BWL evaluation, uplift continuity checks, and autopopulation without diverging regexes.
+ */
+export function isHoldDownConnector(node: SceneNodeLike): boolean {
+  if (node.type !== 'structural:connector') return false
+  const catalog = lookupConnectorCatalogForNode(node)
+  if (catalog) return catalog.category === 'hold-down'
+  return node.category === 'hold-down'
+}
+
+/**
+ * Resolve verified ASD uplift capacity (lbs) for a hold-down connector.
+ * Cataloged hold-downs cap explicit overrides at their published catalog rating;
+ * unlisted SKUs return 0 unless an explicit positive `upliftCapacityLbs` is provided.
+ */
+export function resolveHoldDownUpliftLbs(node: SceneNodeLike): number {
+  if (!isHoldDownConnector(node)) return 0
+  const catalog = lookupConnectorCatalogForNode(node)
+  const explicit =
+    typeof node.upliftCapacityLbs === 'number' &&
+    Number.isFinite(node.upliftCapacityLbs) &&
+    node.upliftCapacityLbs > 0
+      ? node.upliftCapacityLbs
+      : 0
+  if (catalog) {
+    return explicit > 0 ? Math.min(explicit, catalog.upliftLbs) : catalog.upliftLbs
+  }
+  return explicit
+}
+
+/**
+ * Determine whether a wall-less roof level should be adopted onto `targetLevelId`
+ * (the highest walled level in the same building at or below the roof level).
+ */
+export function shouldAdoptWallLessRoofLevel(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  targetLevelId: string,
+  roofLevel: SceneNodeLike,
+): boolean {
+  const targetLevel = nodes[targetLevelId]
+  if (!targetLevel) return false
+  if (
+    typeof targetLevel.parentId === 'string' &&
+    typeof roofLevel.parentId === 'string' &&
+    targetLevel.parentId !== roofLevel.parentId
+  ) {
+    return false
+  }
+  const allValues = Object.values(nodes)
+  const roofLevelHasWalls = allValues.some(
+    (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, roofLevel.id),
+  )
+  if (roofLevelHasWalls) return false
+
+  const roofOrder = levelSortOrder(roofLevel)
+  const siblingWalledLevels = allValues
+    .filter(
+      (n) =>
+        n.type === 'level' &&
+        n.id !== roofLevel.id &&
+        n.parentId === roofLevel.parentId &&
+        allValues.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id)),
+    )
+    .sort((a, b) => levelSortOrder(a) - levelSortOrder(b))
+
+  if (siblingWalledLevels.length === 0) return false
+  const belowRoof = siblingWalledLevels.filter((l) => levelSortOrder(l) <= roofOrder)
+  const hostLevel =
+    belowRoof.length > 0 ? belowRoof[belowRoof.length - 1]! : siblingWalledLevels[siblingWalledLevels.length - 1]!
+  return hostLevel.id === targetLevelId
+}
+
+export function isCommercialRtuEquipment(node: SceneNodeLike): boolean {
+  return (
+    node.type === 'hvac:equipment' &&
+    node.visible !== false &&
+    /rooftop-package|\brtu\b/i.test(`${String(node.equipmentKind ?? node.kind ?? '')} ${String(node.name ?? '')}`)
+  )
+}
+
+/**
+ * Canonical lookup of commercial rooftop package units (RTUs) hosted by `levelId`,
+ * including RTUs placed on an adopted wall-less roof level directly above `levelId`.
+ */
+export function findLevelCommercialRtus(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null,
+): SceneNodeLike[] {
+  return Object.values(nodes).filter((n) => {
+    if (!isCommercialRtuEquipment(n)) return false
+    if (belongsToLevel(nodes, n, levelId)) return true
+    if (levelId) {
+      const rtuLvlId = resolveNodeLevelId(nodes, n)
+      if (rtuLvlId && rtuLvlId !== levelId) {
+        const p = nodes[rtuLvlId]
+        if (p?.type === 'level' && shouldAdoptWallLessRoofLevel(nodes, levelId, p)) return true
+      }
+    }
+    return false
+  })
+}
+
 // ============================================================================
 // IRC R302.11 FIRE BLOCKING & R302.12 DRAFTSTOPPING RULES
 // ============================================================================

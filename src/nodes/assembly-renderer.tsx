@@ -13,7 +13,13 @@ import { useEffect, useMemo } from 'react'
 import type { Group, InstancedMesh, Material } from 'three'
 import { buildBuildingSkeletonGroup } from '../cad/building-skeleton'
 import { classifyOpeningKind } from '../irc/openings'
-import { type SceneNodeLike, belongsToLevel } from '../irc/tables'
+import {
+  type SceneNodeLike,
+  belongsToLevel,
+  isCommercialRtuEquipment,
+  resolveNodeLevelId,
+  shouldAdoptWallLessRoofLevel,
+} from '../irc/tables'
 import type { StructuralAssemblyNode } from './assembly'
 
 /**
@@ -58,6 +64,16 @@ export function computeSkeletonFingerprint(
         // without rebuilding this story's GPU skeleton when another story's walls move.
         otherWalledLevelIds.add(n.parentId)
       }
+    } else if (isCommercialRtuEquipment(n)) {
+      if (!targetLevelId || belongsToLevel(nodes, n, targetLevelId)) {
+        relevantIds.push(id)
+      } else {
+        const rtuLvlId = resolveNodeLevelId(nodes, n)
+        const rtuLvl = rtuLvlId ? nodes[rtuLvlId] : undefined
+        if (rtuLvl?.type === 'level' && shouldAdoptWallLessRoofLevel(nodes, targetLevelId, rtuLvl)) {
+          relevantIds.push(id)
+        }
+      }
     } else if (
       t === 'slab' ||
       t === 'door' ||
@@ -82,6 +98,7 @@ export function computeSkeletonFingerprint(
       JSON.stringify([
         n.id,
         n.type,
+        n.name,
         n.parentId,
         n.visible,
         n.level,
@@ -96,6 +113,9 @@ export function computeSkeletonFingerprint(
         n.scale,
         n.width,
         n.depth,
+        n.widthM,
+        n.depthM,
+        n.equipmentKind,
         n.sillHeight,
         n.pitch,
         n.overhang,
