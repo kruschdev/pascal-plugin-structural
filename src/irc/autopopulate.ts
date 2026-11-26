@@ -148,8 +148,18 @@ export function autopopulateStructuralScene(
   }
   const primaryCluster = footprintClusters.reduce(
     (best, c) => (c.widthM * c.depthM > best.widthM * best.depthM ? c : best),
-    footprintClusters[0] ?? { minX, maxX, minZ, maxZ, widthM: maxX - minX, depthM: maxZ - minZ, avgWallHeightM: 2.7432 },
+    footprintClusters[0] ?? {
+      minX,
+      maxX,
+      minZ,
+      maxZ,
+      widthM: maxX - minX,
+      depthM: maxZ - minZ,
+      avgWallHeightM: 2.7432,
+      baseElevationM: 0,
+    },
   )
+  const levelBaseY = primaryCluster.baseElevationM
   const footprintWidthFt = Math.max(10, primaryCluster.widthM * METERS_TO_FEET)
   const footprintDepthFt = Math.max(10, primaryCluster.depthM * METERS_TO_FEET)
   const shortSpanFt = Math.min(footprintWidthFt, footprintDepthFt)
@@ -443,7 +453,7 @@ export function autopopulateStructuralScene(
         storiesSupported: design.storiesAbove,
         preferredFamily: options.preferredBeamFamily ?? cFloorSizing.recommendedGirder.entry.family,
       })
-      const girderY = -((girderCheck.entry.depthIn * INCHES_TO_METERS) / 2)
+      const girderY = cluster.baseElevationM - (girderCheck.entry.depthIn * INCHES_TO_METERS) / 2
       let firstGirderId = ''
       const bayGirderIds: string[] = []
 
@@ -529,7 +539,7 @@ export function autopopulateStructuralScene(
           type: 'structural:column',
           name: `Girder Post #${p} (${colSizing.entry.designation})`,
           parentId: levelId,
-          position: [Number(px.toFixed(3)), -cluster.avgWallHeightM, Number(pz.toFixed(3))],
+          position: [Number(px.toFixed(3)), Number((cluster.baseElevationM - cluster.avgWallHeightM).toFixed(3)), Number(pz.toFixed(3))],
           heightM: Number(Math.max(0.8, cluster.avgWallHeightM - girderCheck.entry.depthIn * INCHES_TO_METERS).toFixed(3)),
           columnType: colSizing.entry.columnType,
           designation: colSizing.entry.designation,
@@ -555,7 +565,7 @@ export function autopopulateStructuralScene(
         if (includeFoundation) {
           emitConnector({
             sku: colSizing.recommendedBaseSku,
-            position: [px, -cluster.avgWallHeightM, pz],
+            position: [px, cluster.baseElevationM - cluster.avgWallHeightM, pz],
             attachedNodeIds: [colId],
             name: `${colSizing.recommendedBaseSku} Standoff Post Base`,
           })
@@ -601,7 +611,7 @@ export function autopopulateStructuralScene(
         species: design.species,
       })
 
-      const ridgeY = cluster.avgWallHeightM + (cShortFt / 2) * (roofPitchRise / 12) * FEET_TO_METERS
+      const ridgeY = cluster.baseElevationM + cluster.avgWallHeightM + (cShortFt / 2) * (roofPitchRise / 12) * FEET_TO_METERS
       const ridgeDepthM = rb.entry.depthIn * INCHES_TO_METERS
       const ridgeBayIds: string[] = []
 
@@ -649,7 +659,7 @@ export function autopopulateStructuralScene(
       }
 
       // Ridge-beam bearing posts at both gable ends + any intermediate bay splits (span > 20 ft)
-      const postHeightM = Number(Math.max(0.8, ridgeY - ridgeDepthM / 2).toFixed(3))
+      const postHeightM = Number(Math.max(0.8, ridgeY - cluster.baseElevationM - ridgeDepthM / 2).toFixed(3))
       for (let p = 0; p <= ridgeBays; p++) {
         const t = p / ridgeBays
         const pt: Vec2 = [
@@ -675,7 +685,7 @@ export function autopopulateStructuralScene(
           type: 'structural:column',
           name: `Ridge Beam Bearing Post #${p + 1} (${postSizing.entry.designation})`,
           parentId: levelId,
-          position: [pt[0], 0, pt[1]],
+          position: [pt[0], cluster.baseElevationM, pt[1]],
           heightM: postHeightM,
           columnType: postSizing.entry.columnType,
           designation: postSizing.entry.designation,
@@ -691,13 +701,13 @@ export function autopopulateStructuralScene(
         })
         emitConnector({
           sku: postSizing.recommendedCapSku,
-          position: [pt[0], postHeightM, pt[1]],
+          position: [pt[0], cluster.baseElevationM + postHeightM, pt[1]],
           attachedNodeIds: [colId, ...attachedRidgeIds],
         })
         if (includeFoundation) {
           emitConnector({
             sku: postSizing.recommendedBaseSku,
-            position: [pt[0], 0, pt[1]],
+            position: [pt[0], cluster.baseElevationM, pt[1]],
             attachedNodeIds: [colId],
           })
         }
@@ -709,7 +719,7 @@ export function autopopulateStructuralScene(
     const tieCount = Math.max(8, Math.ceil((longSpanFt * 12) / roofSizing.spacingIn) * 2)
     emitConnector({
       sku: tieSku,
-      position: [(minX + maxX) / 2, defaultWallHeightM, minZ],
+      position: [(minX + maxX) / 2, levelBaseY + defaultWallHeightM, minZ],
       quantity: tieCount,
       attachedNodeIds: [assemblyId],
       name: `${tieSku} Hurricane Ties (x${tieCount} @ ${roofSizing.spacingIn}" OC both eaves)`,
@@ -719,14 +729,14 @@ export function autopopulateStructuralScene(
     const clipQty = Math.max(12, Math.ceil((footprintWidthFt + footprintDepthFt) / 2))
     emitConnector({
       sku: 'A35',
-      position: [minX, defaultWallHeightM, (minZ + maxZ) / 2],
+      position: [minX, levelBaseY + defaultWallHeightM, (minZ + maxZ) / 2],
       quantity: clipQty,
       attachedNodeIds: [assemblyId],
       name: `A35 Framing Angles (x${clipQty} gable & blocking shear transfer)`,
     })
     emitConnector({
       sku: 'LTP4',
-      position: [maxX, 0, (minZ + maxZ) / 2],
+      position: [maxX, levelBaseY, (minZ + maxZ) / 2],
       quantity: clipQty,
       attachedNodeIds: [assemblyId],
       name: `LTP4 Lateral Tie Plates (x${clipQty} rim-to-plate shear transfer)`,
@@ -745,7 +755,7 @@ export function autopopulateStructuralScene(
     const strapQty = Math.max(8, Math.ceil(((footprintWidthFt + footprintDepthFt) * 2) / 12))
     emitConnector({
       sku: strapSku,
-      position: [minX, defaultWallHeightM - 0.3, minZ],
+      position: [minX, levelBaseY + defaultWallHeightM - 0.3, minZ],
       quantity: strapQty,
       attachedNodeIds: [assemblyId],
       name: `${strapSku} Continuous Uplift / Collector Straps (x${strapQty})`,
@@ -755,7 +765,7 @@ export function autopopulateStructuralScene(
   for (const bwl of bwlReports) {
     if (bwl.requiredHoldDownSku) {
       const hdPos: Vec3 =
-        bwl.axis === 'X' ? [minX + 0.15, 0, bwl.offsetM] : [bwl.offsetM, 0, minZ + 0.15]
+        bwl.axis === 'X' ? [minX + 0.15, levelBaseY, bwl.offsetM] : [bwl.offsetM, levelBaseY, minZ + 0.15]
       emitConnector({
         sku: bwl.requiredHoldDownSku,
         position: hdPos,
@@ -779,7 +789,7 @@ export function autopopulateStructuralScene(
     const boltQty = Math.max(8, Math.ceil(perimFt / boltSpacingFt) + 4)
     emitConnector({
       sku: 'SSTB16',
-      position: [(minX + maxX) / 2, 0.04, minZ],
+      position: [(minX + maxX) / 2, levelBaseY + 0.04, minZ],
       quantity: boltQty,
       attachedNodeIds: [assemblyId],
       name: `SSTB16 Foundation Sill Anchor Bolts (x${boltQty} @ ${boltSpacingFt}' OC, IRC R403.1.6)`,
@@ -787,7 +797,7 @@ export function autopopulateStructuralScene(
     if (highSeismic) {
       emitConnector({
         sku: 'BP3x3',
-        position: [(minX + maxX) / 2, 0.04, minZ],
+        position: [(minX + maxX) / 2, levelBaseY + 0.04, minZ],
         quantity: boltQty,
         attachedNodeIds: [assemblyId],
         name: `BP3x3 Seismic Plate Washers (x${boltQty} @ ${boltSpacingFt}' OC, IRC R602.11.1)`,

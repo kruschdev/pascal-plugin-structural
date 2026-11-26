@@ -33,11 +33,15 @@ export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
   const editedDesignParams = useStructuralUi((s) => s.editedDesignParams)
   const setActiveTab = useStructuralUi((s) => s.setActiveTab)
 
+  const raw = node as unknown as SceneNodeLike | undefined
+  const isStructuralNode = Boolean(raw && typeof raw.type === 'string' && raw.type.startsWith('structural:'))
+
   const designOverride = useMemo(
     () => (Object.keys(editedDesignParams).length > 0 ? editedDesignParams : undefined),
     [editedDesignParams],
   )
   const design = useMemo(() => {
+    if (!isStructuralNode) return DEFAULT_DESIGN_PARAMS
     const firstAssembly = Object.values(nodes).find((n) => n.type === 'structural:assembly')
     const persisted = (firstAssembly?.designParams as Partial<StructuralDesignParams> | undefined) ?? {}
     return {
@@ -45,16 +49,18 @@ export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
       ...persisted,
       ...editedDesignParams,
     }
-  }, [nodes, editedDesignParams])
-  const audit = useMemo(() => auditStructuralScene(nodes, designOverride), [nodes, designOverride])
+  }, [isStructuralNode, nodes, editedDesignParams])
+  const audit = useMemo(
+    () => (isStructuralNode ? auditStructuralScene(nodes, designOverride) : null),
+    [isStructuralNode, nodes, designOverride],
+  )
 
-  const raw = node as unknown as SceneNodeLike | undefined
   const nodeFindings = useMemo(
-    () => (raw ? audit.findings.filter((f) => f.nodeId === raw.id) : []),
+    () => (raw && audit ? audit.findings.filter((f) => f.nodeId === raw.id) : []),
     [audit, raw],
   )
 
-  if (!raw || !raw.type.startsWith('structural:')) return null
+  if (!isStructuralNode || !raw) return null
 
   const hasError = nodeFindings.some((f) => f.severity === 'error')
   const hasWarning = nodeFindings.length > 0 && !hasError

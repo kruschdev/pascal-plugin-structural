@@ -33,6 +33,7 @@ export type FootprintCluster = {
   widthM: number
   depthM: number
   avgWallHeightM: number
+  baseElevationM: number
 }
 
 /** Backwards-compatible alias for canonical `belongsToLevel` from `./tables`. */
@@ -226,7 +227,7 @@ export function clusterLevelFootprints(
     (n) => n.type === 'slab' && n.visible !== false && Array.isArray(n.polygon) && (n.polygon as Vec2[]).length >= 3,
   )
 
-  const slabBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number }> = []
+  const slabBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; elev: number }> = []
   for (const slab of slabs) {
     let minX = Number.POSITIVE_INFINITY
     let maxX = Number.NEGATIVE_INFINITY
@@ -241,13 +242,14 @@ export function clusterLevelFootprints(
       }
     }
     if (Number.isFinite(minX) && maxX - minX > 0.5 && maxZ - minZ > 0.5) {
-      slabBoxes.push({ minX, maxX, minZ, maxZ })
+      const elev = typeof slab.elevation === 'number' && Number.isFinite(slab.elevation) ? slab.elevation : 0
+      slabBoxes.push({ minX, maxX, minZ, maxZ, elev })
     }
   }
-  const seedBoxes = slabBoxes.map((b) => ({ ...b }))
+  const seedBoxes = slabBoxes.map((b) => ({ minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ }))
 
   // Also include wall-only structures not covered by any slab
-  const wallBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; height: number }> = []
+  const wallBoxes: Array<{ minX: number; maxX: number; minZ: number; maxZ: number; height: number; elev: number }> = []
   for (const w of walls) {
     const sx = Number(w.start![0])
     const sz = Number(w.start![1])
@@ -260,6 +262,7 @@ export function clusterLevelFootprints(
       minZ: Math.min(sz, ez),
       maxZ: Math.max(sz, ez),
       height: typeof w.height === 'number' && w.height > 0 ? w.height : 2.55,
+      elev: typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0,
     }
     wallBoxes.push(wb)
     const touchesSlab = slabBoxes.some(
@@ -286,6 +289,7 @@ export function clusterLevelFootprints(
         widthM: Math.max(0, b.maxX - b.minX),
         depthM: Math.max(0, b.maxZ - b.minZ),
         avgWallHeightM: b.avgWallHeightM,
+        baseElevationM: b.baseElevationM,
       },
     ]
   }
@@ -298,6 +302,7 @@ export function clusterLevelFootprints(
     .map((c) => {
       let hSum = 0
       let hCount = 0
+      let minElev = Number.POSITIVE_INFINITY
       for (const wb of wallBoxes) {
         if (
           wb.minX <= c.maxX + gapToleranceM &&
@@ -307,6 +312,17 @@ export function clusterLevelFootprints(
         ) {
           hSum += wb.height
           hCount += 1
+          if (wb.elev < minElev) minElev = wb.elev
+        }
+      }
+      for (const sb of slabBoxes) {
+        if (
+          sb.minX <= c.maxX + gapToleranceM &&
+          sb.maxX >= c.minX - gapToleranceM &&
+          sb.minZ <= c.maxZ + gapToleranceM &&
+          sb.maxZ >= c.minZ - gapToleranceM
+        ) {
+          if (sb.elev < minElev) minElev = sb.elev
         }
       }
       return {
@@ -317,6 +333,7 @@ export function clusterLevelFootprints(
         widthM: c.maxX - c.minX,
         depthM: c.maxZ - c.minZ,
         avgWallHeightM: hCount > 0 ? hSum / hCount : globalAvgH,
+        baseElevationM: Number.isFinite(minElev) ? minElev : 0,
       }
     })
 }
@@ -327,13 +344,14 @@ export function clusterLevelFootprints(
 export function computeLevelBounds(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
-): { minX: number; maxX: number; minZ: number; maxZ: number; avgWallHeightM: number } {
+): { minX: number; maxX: number; minZ: number; maxZ: number; avgWallHeightM: number; baseElevationM: number } {
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
   let minZ = Number.POSITIVE_INFINITY
   let maxZ = Number.NEGATIVE_INFINITY
   let hSum = 0
   let hCount = 0
+  let minElev = Number.POSITIVE_INFINITY
 
   for (const n of Object.values(nodes)) {
     if (!belongsToLevel(nodes, n, levelId)) continue
@@ -351,6 +369,8 @@ export function computeLevelBounds(
       const h = typeof n.height === 'number' && n.height > 0 ? n.height : 2.55
       hSum += h
       hCount += 1
+      const e = typeof n.elevation === 'number' && Number.isFinite(n.elevation) ? n.elevation : 0
+      if (e < minElev) minElev = e
     } else if (n.type === 'slab' && Array.isArray(n.polygon)) {
       for (const pt of n.polygon as ReadonlyArray<Vec2>) {
         if (Number.isFinite(pt[0]) && Number.isFinite(pt[1])) {
@@ -360,11 +380,13 @@ export function computeLevelBounds(
           maxZ = Math.max(maxZ, pt[1])
         }
       }
+      const e = typeof n.elevation === 'number' && Number.isFinite(n.elevation) ? n.elevation : 0
+      if (e < minElev) minElev = e
     }
   }
 
   if (!Number.isFinite(minX)) {
-    return { minX: 0, maxX: 9.144, minZ: 0, maxZ: 7.315, avgWallHeightM: 2.7432 }
+    return { minX: 0, maxX: 9.144, minZ: 0, maxZ: 7.315, avgWallHeightM: 2.7432, baseElevationM: 0 }
   }
   return {
     minX,
@@ -372,5 +394,6 @@ export function computeLevelBounds(
     minZ,
     maxZ,
     avgWallHeightM: hCount > 0 ? hSum / hCount : 2.55,
+    baseElevationM: Number.isFinite(minElev) ? minElev : 0,
   }
 }

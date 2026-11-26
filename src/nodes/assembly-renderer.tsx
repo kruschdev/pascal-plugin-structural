@@ -13,7 +13,7 @@ import { useEffect, useMemo } from 'react'
 import type { Group, InstancedMesh, Material } from 'three'
 import { buildBuildingSkeletonGroup } from '../cad/building-skeleton'
 import { classifyOpeningKind } from '../irc/openings'
-import type { SceneNodeLike } from '../irc/tables'
+import { type SceneNodeLike, belongsToLevel } from '../irc/tables'
 import type { StructuralAssemblyNode } from './assembly'
 
 /**
@@ -43,24 +43,37 @@ export function computeSkeletonFingerprint(
     ]),
   ]
 
+  const targetLevelId = typeof assembly.parentId === 'string' ? assembly.parentId : null
   const relevantIds: string[] = []
+  const otherWalledLevelIds = new Set<string>()
   for (const [id, n] of Object.entries(nodes)) {
     const t = n.type
-    if (
-      t === 'level' ||
-      t === 'wall' ||
+    if (t === 'level' || t === 'roof' || t === 'roof-segment') {
+      relevantIds.push(id)
+    } else if (t === 'wall') {
+      if (!targetLevelId || belongsToLevel(nodes, n, targetLevelId)) {
+        relevantIds.push(id)
+      } else if (n.visible !== false && typeof n.parentId === 'string') {
+        // Track only boolean wall presence on sibling levels so highest/lowest story checks stay reactive
+        // without rebuilding this story's GPU skeleton when another story's walls move.
+        otherWalledLevelIds.add(n.parentId)
+      }
+    } else if (
       t === 'slab' ||
       t === 'door' ||
       t === 'window' ||
-      t === 'roof' ||
-      t === 'roof-segment' ||
       (t === 'structural:beam' && (n.role === 'header' || n.role === 'ridge-beam')) ||
       (t === 'item' && classifyOpeningKind(n) !== null)
     ) {
-      relevantIds.push(id)
+      if (!targetLevelId || belongsToLevel(nodes, n, targetLevelId)) {
+        relevantIds.push(id)
+      }
     }
   }
   relevantIds.sort()
+  if (otherWalledLevelIds.size > 0) {
+    parts.push(`walled:${[...otherWalledLevelIds].sort().join(',')}`)
+  }
 
   for (const id of relevantIds) {
     const n = nodes[id]!

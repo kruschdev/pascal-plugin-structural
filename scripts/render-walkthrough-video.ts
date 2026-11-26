@@ -641,7 +641,17 @@ const gifProc = Bun.spawn(
   ],
   { stdout: 'ignore', stderr: 'pipe' },
 )
-const gifCode = await gifProc.exited
+const gifTimer = setTimeout(() => {
+  try {
+    gifProc.kill('SIGKILL')
+  } catch {}
+}, 60_000)
+let gifCode = -1
+try {
+  gifCode = await gifProc.exited
+} finally {
+  clearTimeout(gifTimer)
+}
 if (gifCode !== 0 || !fs.existsSync(outGif)) {
   console.error('FFmpeg GIF encode failed:', await new Response(gifProc.stderr).text())
   process.exit(1)

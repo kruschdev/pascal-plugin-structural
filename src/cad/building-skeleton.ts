@@ -374,6 +374,7 @@ function extractLevelRoofSegments(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
   defaultWallHeightM: number,
+  levelBaseY = 0,
 ): ExtractedRoofSegment[] {
   const out: ExtractedRoofSegment[] = []
 
@@ -428,7 +429,7 @@ function extractLevelRoofSegments(
     const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
     const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
     // Seat roof eaves right on top of the level's double top plates and consistently honor segment knee-wall height
-    const cy = py > 0.05 ? py + segWallH : defaultWallHeightM + segWallH
+    const cy = py > 0.05 ? py + segWallH : levelBaseY + defaultWallHeightM + segWallH
 
     out.push({
       cx: px,
@@ -821,7 +822,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     if (floorRegions.length === 0 && walls.length >= 2) {
       const b = computeLevelBounds(nodes, levelId)
       if (b.maxX - b.minX > 1 && b.maxZ - b.minZ > 1) {
-        floorRegions.push({ minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ, topY: -0.02 })
+        floorRegions.push({ minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ, topY: b.baseElevationM - 0.02 })
       }
     }
 
@@ -899,7 +900,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   // 3. ROOF FRAMING SYSTEM (EXACT PASCAL `roof-segment` AXES + POINT-TO-POINT TRUSSES)
   // ============================================================================
   if (showRoof) {
-    let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM)
+    const levelBounds = computeLevelBounds(nodes, levelId)
+    let roofSegments = extractLevelRoofSegments(nodes, levelId, defaultWallHeightM, levelBounds.baseElevationM)
 
     // Fallback when no roof-segment exists yet: synthesize gable roofs per transitively connected footprint cluster
     // ONLY on the highest walled story (so lower floors of multi-story buildings never project a roof into the story above!)
@@ -912,7 +914,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const ridgeAlongX = spanX >= spanZ
           roofSegments.push({
             cx: (env.minX + env.maxX) / 2,
-            cy: env.avgWallHeightM,
+            cy: env.baseElevationM + env.avgWallHeightM,
             cz: (env.minZ + env.maxZ) / 2,
             yaw: ridgeAlongX ? 0 : Math.PI / 2,
             roofType: 'gable',
@@ -1004,9 +1006,20 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         const bs = rb.start as Vec2 | undefined
         const be = rb.end as Vec2 | undefined
         if (!Array.isArray(bs) || !Array.isArray(be)) return false
+        const bdx = be[0] - bs[0]
+        const bdz = be[1] - bs[1]
+        const bLen = Math.hypot(bdx, bdz)
+        if (bLen < 0.2) return false
+        // Require direction alignment (|dot| >= 0.85) so a main E-W ridge never suppresses a perpendicular N-S cross-gable ridge
+        const dirDot = Math.abs((bdx / bLen) * ridgeAxisWorld[0] + (bdz / bLen) * ridgeAxisWorld[2])
+        if (dirDot < 0.85) return false
         const bmx = (bs[0] + be[0]) / 2
         const bmz = (bs[1] + be[1]) / 2
-        return Math.hypot(bmx - ridgeCenterWorld[0], bmz - ridgeCenterWorld[2]) <= Math.max(seg.widthM * 0.6, 1.5)
+        const ox = bmx - ridgeCenterWorld[0]
+        const oz = bmz - ridgeCenterWorld[2]
+        const alongDist = Math.abs(ox * ridgeAxisWorld[0] + oz * ridgeAxisWorld[2])
+        const perpDist = Math.abs(ox * slopeAxisWorld[0] + oz * slopeAxisWorld[2])
+        return perpDist <= 0.6 && alongDist <= Math.max(seg.widthM * 0.6, 1.5)
       })
       if (!isTruss && showBeams && !hasPersistedRidge) {
         const rLen = Math.hypot(
@@ -1132,14 +1145,17 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           }
         }
 
-        // Gable-end vertical rake studs at exposed end trusses/rafters (trim bottom cleanly to host roof plane!)
+        // Gable-end vertical rake studs at exposed exterior gable ends (suppress interior valley throats where hostY > seg.cy + 0.12!)
         if ((i === 0 || i === count - 1) && seg.roofType === 'gable') {
           const gableStep = 16 * INCHES_TO_METERS
           for (let gz = -halfRun + gableStep; gz < halfRun - 0.15; gz += gableStep) {
             const studTopY = riseM * (1 - Math.abs(gz) / halfRun) - 0.06
             const studTopWorld = toWorld(lx, studTopY, gz)
             const hostY = isOverFramed ? hostSurfaceYAt(studTopWorld[0], studTopWorld[2], hostRoofs) : null
-            const studBotLocalY = hostY !== null ? Math.max(0.08, hostY - seg.cy + 0.04) : 0.08
+            // If this gable end sits mid-slope above the host roof (interior valley termination), do NOT block the attic throat!
+            // Keep exterior flush gable ends where hostY is null or sits right at eave/plate level (hostY <= seg.cy + 0.12).
+            if (hostY !== null && hostY > seg.cy + 0.12) continue
+            const studBotLocalY = 0.08
             if (studTopY - studBotLocalY > 0.14) {
               pushStrut('lumber', toWorld(lx, studBotLocalY, gz), studTopWorld, 0.089, memberThickM, ridgeAxisWorld)
             }
@@ -1160,18 +1176,38 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       }
 
       // Emit diagonal California Over-Frame Valley Sleepers / Valley Rafters joining the clipped jack rafters
-      // smoothly from the eave valley corner up to the ridge-to-host intersection point.
+      // cleanly from the low eave valley corner up to every ridge-to-host apex (handles one-sided, two-sided
+      // U/saddle, AND equal-peak L/T intersections where ridge endpoints touch the host surface at t=0 or t=1).
       if (isOverFramed) {
+        const startHostY = hostSurfaceYAt(ridgeClip.start[0], ridgeClip.start[2], hostRoofs)
+        const endHostY = hostSurfaceYAt(ridgeClip.end[0], ridgeClip.end[2], hostRoofs)
+        const startTouchesHost =
+          ridgeClip.clippedStart || (startHostY !== null && Math.abs(ridgeClip.start[1] - startHostY) <= 0.08)
+        const endTouchesHost =
+          ridgeClip.clippedEnd || (endHostY !== null && Math.abs(ridgeClip.end[1] - endHostY) <= 0.08)
+
         const emitValleySleeper = (pts: Vec3Tuple[]) => {
           if (pts.length === 0) return
-          const ordered: Vec3Tuple[] = [...pts]
-          if (ridgeClip.clippedStart) ordered.unshift(ridgeClip.start)
-          if (ridgeClip.clippedEnd) ordered.push(ridgeClip.end)
-          if (ordered.length < 2) return
-          const p0 = ordered[0]!
-          const p1 = ordered[ordered.length - 1]!
-          if (Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) >= 0.25) {
-            pushStrut('header-lvl', p0, p1, 0.14, 0.05, slopeAxisWorld)
+          let lowPt = pts[0]!
+          let highPt = pts[0]!
+          for (const pt of pts) {
+            if (pt[1] < lowPt[1]) lowPt = pt
+            if (pt[1] > highPt[1]) highPt = pt
+          }
+          const pairs: Array<[Vec3Tuple, Vec3Tuple]> = []
+          if (startTouchesHost && endTouchesHost) {
+            pairs.push([ridgeClip.start, lowPt], [lowPt, ridgeClip.end])
+          } else if (startTouchesHost) {
+            pairs.push([ridgeClip.start, lowPt])
+          } else if (endTouchesHost) {
+            pairs.push([lowPt, ridgeClip.end])
+          } else if (pts.length >= 2) {
+            pairs.push([highPt, lowPt])
+          }
+          for (const [p0, p1] of pairs) {
+            if (Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) >= 0.25) {
+              pushStrut('header-lvl', p0, p1, 0.14, 0.05, slopeAxisWorld)
+            }
           }
         }
         emitValleySleeper(valleyPtsN)

@@ -62,8 +62,8 @@ AUD_DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wr
 echo "Video duration: ${VID_DUR}s | Audio duration: ${AUD_DUR}s"
 
 # Proportionally align video pacing to voiceover length (with +0.4s clean outro hold)
-TARGET_DUR="$(python3 -c "v=float('$VID_DUR'); a=float('$AUD_DUR'); print(f'{max(v, a + 0.4):.2f}')")"
-PTS_SCALE="$(python3 -c "v=float('$VID_DUR'); t=float('$TARGET_DUR'); print(f'{max(1.0, t / v):.4f}')")"
+TARGET_DUR="$(python3 -c 'import sys; v=float(sys.argv[1]); a=float(sys.argv[2]); print(f"{max(v, a + 0.4):.2f}")' "$VID_DUR" "$AUD_DUR")"
+PTS_SCALE="$(python3 -c 'import sys; v=float(sys.argv[1]); t=float(sys.argv[2]); print(f"{max(1.0, t / v):.4f}")' "$VID_DUR" "$TARGET_DUR")"
 echo "Muxing proportionally synced video (setpts=${PTS_SCALE}*PTS, dur=${TARGET_DUR}s) + loudnorm AAC audio into $OUT_MP4..."
 
 ffmpeg -y \

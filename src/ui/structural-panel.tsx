@@ -451,7 +451,14 @@ export default function StructuralHostPanel() {
     setPlaceIdx((i) => i + 1)
 
     const levelWalls = Object.values(record)
-      .filter((n) => n.type === 'wall' && belongsToLevel(record, n, levelId) && Array.isArray(n.start) && Array.isArray(n.end))
+      .filter(
+        (n) =>
+          n.type === 'wall' &&
+          n.visible !== false &&
+          belongsToLevel(record, n, levelId) &&
+          Array.isArray(n.start) &&
+          Array.isArray(n.end),
+      )
       .map((w) => {
         const sx = Number(w.start![0])
         const sz = Number(w.start![1])
@@ -459,8 +466,9 @@ export default function StructuralHostPanel() {
         const ez = Number(w.end![1])
         const len = Math.hypot(ex - sx, ez - sz)
         const h = typeof w.height === 'number' && w.height > 0 ? w.height : b.avgWallHeightM
+        const baseY = typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0
         const thick = typeof w.thickness === 'number' && w.thickness > 0 ? w.thickness : 0.14
-        return { wall: w, sx, sz, ex, ez, len, h, thick }
+        return { wall: w, sx, sz, ex, ez, len, h, baseY, thick }
       })
       .filter((w) => w.len >= 1.2)
       .sort((a, bW) => bW.len - a.len)
@@ -507,7 +515,7 @@ export default function StructuralHostPanel() {
 
     let start: [number, number] = [Number((cx - 1.5).toFixed(2)), Number(cz.toFixed(2))]
     let end: [number, number] = [Number((cx + 1.5).toFixed(2)), Number(cz.toFixed(2))]
-    let elevationY = Number(Math.max(1.2, b.avgWallHeightM * 0.52).toFixed(2))
+    let elevationY = Number((b.baseElevationM + Math.max(1.2, b.avgWallHeightM * 0.52)).toFixed(2))
     let heightM = 0.089
     let thicknessM = 0.14
     let hostWallId: string | undefined
@@ -517,7 +525,9 @@ export default function StructuralHostPanel() {
       if (seg) {
         start = seg.start
         end = seg.end
-        elevationY = Number((seg.wall.h * 0.52).toFixed(2))
+        // Match IRC R302.11(2) 10 ft tier elevation (3.048 m above wall base) on tall walls so auditStructuralScene passes
+        const relY = kind === 'wall-vertical-10ft' && seg.wall.h > 3.048 ? 3.048 : seg.wall.h * 0.52
+        elevationY = Number((seg.wall.baseY + relY).toFixed(2))
         heightM = 0.089
         thicknessM = Number(Math.max(0.089, seg.wall.thick).toFixed(3))
         hostWallId = seg.wall.wall.id
@@ -527,7 +537,7 @@ export default function StructuralHostPanel() {
       if (seg) {
         start = seg.start
         end = seg.end
-        elevationY = Number(Math.max(1.8, seg.wall.h - 0.36).toFixed(2))
+        elevationY = Number((seg.wall.baseY + Math.max(1.8, seg.wall.h - 0.36)).toFixed(2))
         heightM = 0.24
         thicknessM = Number(Math.max(0.14, seg.wall.thick).toFixed(3))
         hostWallId = seg.wall.wall.id
@@ -538,7 +548,7 @@ export default function StructuralHostPanel() {
       const chaseZ = Number((b.minZ + 0.45).toFixed(2))
       start = [Number((chaseX - 0.28).toFixed(2)), chaseZ]
       end = [Number((chaseX + 0.28).toFixed(2)), chaseZ]
-      elevationY = Number(Math.max(2.0, b.avgWallHeightM - 0.28).toFixed(2))
+      elevationY = Number((b.baseElevationM + Math.max(2.0, b.avgWallHeightM - 0.28)).toFixed(2))
       heightM = 0.22
       thicknessM = 0.56
     } else if (kind === 'penetration-firestop') {
@@ -548,23 +558,23 @@ export default function StructuralHostPanel() {
         const mz = (seg.start[1] + seg.end[1]) / 2
         start = [Number((mx - 0.08).toFixed(3)), Number(mz.toFixed(3))]
         end = [Number((mx + 0.08).toFixed(3)), Number(mz.toFixed(3))]
-        elevationY = Number(Math.max(2.1, seg.wall.h - 0.06).toFixed(2))
+        elevationY = Number((seg.wall.baseY + Math.max(2.1, seg.wall.h - 0.06)).toFixed(2))
         heightM = 0.08
         thicknessM = 0.14
         hostWallId = seg.wall.wall.id
       } else {
         start = [Number((cx - 0.08).toFixed(2)), Number(cz.toFixed(2))]
         end = [Number((cx + 0.08).toFixed(2)), Number(cz.toFixed(2))]
-        elevationY = Number(Math.max(2.1, b.avgWallHeightM - 0.06).toFixed(2))
+        elevationY = Number((b.baseElevationM + Math.max(2.1, b.avgWallHeightM - 0.06)).toFixed(2))
         heightM = 0.08
         thicknessM = 0.14
       }
     } else if (kind === 'floor-draftstop') {
-      elevationY = -0.3
+      elevationY = Number((b.baseElevationM - 0.3).toFixed(2))
       heightM = 0.3
       thicknessM = 0.04
     } else {
-      elevationY = Number(Math.max(1.8, b.avgWallHeightM - 0.3).toFixed(2))
+      elevationY = Number((b.baseElevationM + Math.max(1.8, b.avgWallHeightM - 0.3)).toFixed(2))
       heightM = 0.28
       thicknessM = 0.089
     }

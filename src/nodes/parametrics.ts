@@ -3,6 +3,7 @@
  */
 
 import type { ParametricDescriptor } from '@pascal-app/core'
+import { resolveBeamCatalogEntry, resolveColumnCatalogEntry } from '../irc/sizing'
 import { CONNECTOR_CATALOG, getConnectorBySku } from '../irc/tables'
 import {
   AssemblyKindEnum,
@@ -85,6 +86,25 @@ export const structuralBeamParametrics: ParametricDescriptor<StructuralBeamNode>
       ],
     },
   ],
+  derive: (next, patch) => {
+    if (
+      patch.beamType !== undefined ||
+      patch.widthIn !== undefined ||
+      patch.depthIn !== undefined ||
+      patch.plyCount !== undefined
+    ) {
+      const entry = resolveBeamCatalogEntry({
+        family: next.beamType,
+        widthIn: next.widthIn,
+        depthIn: next.depthIn,
+        plyCount: next.plyCount,
+      })
+      if (entry.designation !== next.designation) {
+        return { designation: entry.designation }
+      }
+    }
+    return {}
+  },
 }
 
 export const structuralColumnParametrics: ParametricDescriptor<StructuralColumnNode> = {
@@ -108,6 +128,19 @@ export const structuralColumnParametrics: ParametricDescriptor<StructuralColumnN
       ],
     },
   ],
+  derive: (next, patch) => {
+    if (patch.columnType !== undefined || patch.widthIn !== undefined || patch.depthIn !== undefined) {
+      const entry = resolveColumnCatalogEntry({
+        columnType: next.columnType,
+        widthIn: next.widthIn,
+        depthIn: next.depthIn,
+      })
+      if (entry.designation !== next.designation) {
+        return { designation: entry.designation }
+      }
+    }
+    return {}
+  },
 }
 
 export const structuralConnectorParametrics: ParametricDescriptor<StructuralConnectorNode> = {
