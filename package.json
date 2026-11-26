@@ -1,0 +1,112 @@
+{
+  "name": "@kruschdev/pascal-plugin-structural",
+  "version": "0.1.0",
+  "description": "Residential & Light-Commercial IRC/AWC/NDS/AISC structural framing, engineered LVL/Glulam/PSL/steel/flitch beams, Simpson-class connector schedules, full IRC R302.11/R302.12 fire blocking & draftstopping, and continuous load-path plugin for Pascal Editor.",
+  "author": "Kevin Ruschman <kruschdev@users.noreply.github.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kruschdev/pascal-plugin-structural.git"
+  },
+  "homepage": "https://github.com/kruschdev/pascal-plugin-structural",
+  "bugs": {
+    "url": "https://github.com/kruschdev/pascal-plugin-structural/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./render": {
+      "types": "./dist/render.d.ts",
+      "import": "./dist/render.js",
+      "default": "./dist/render.js"
+    },
+    "./irc": {
+      "types": "./dist/irc/index.d.ts",
+      "import": "./dist/irc/index.js",
+      "default": "./dist/irc/index.js"
+    },
+    "./cad": {
+      "types": "./dist/cad/index.d.ts",
+      "import": "./dist/cad/index.js",
+      "default": "./dist/cad/index.js"
+    },
+    "./agent-tools": {
+      "types": "./dist/agent-tools.d.ts",
+      "import": "./dist/agent-tools.js",
+      "default": "./dist/agent-tools.js"
+    },
+    "./agent-operations": {
+      "types": "./dist/agent-operations.d.ts",
+      "import": "./dist/agent-operations.js",
+      "default": "./dist/agent-operations.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "docs/ARCHITECTURE.md",
+    "docs/IRC-REFERENCE.md",
+    "docs/AGENT-TOOLS.md",
+    "docs/CAD-CATALOG.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun scripts/build-dist.ts",
+    "prepack": "bun run build",
+    "check-types": "tsc --noEmit",
+    "test": "bun test src",
+    "check:render": "bun scripts/check-render-entry.ts",
+    "export:cad": "bun scripts/export-cad-catalog.ts",
+    "check": "bun run check-types && bun test && bun run check:render && bun run build"
+  },
+  "peerDependencies": {
+    "@pascal-app/core": ">=1.0.0 <2",
+    "@pascal-app/editor": ">=1.0.0 <2",
+    "@pascal-app/viewer": ">=1.0.0 <2",
+    "react": "^18 || ^19",
+    "three": ">=0.185 <1",
+    "zod": "^4",
+    "zustand": "^5"
+  },
+  "devDependencies": {
+    "@pascal-app/core": "1.1.6",
+    "@pascal-app/editor": "1.1.6",
+    "@pascal-app/viewer": "1.1.6",
+    "@types/blob-stream": "^0.1.33",
+    "@types/bun": "^1.3.5",
+    "@types/node": "^22.19.12",
+    "@types/pdfkit": "^0.17.7",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@types/three": "^0.187.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "three": "^0.187.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.6.7",
+    "zustand": "^5.1.0"
+  },
+  "keywords": [
+    "pascal",
+    "pascal-plugin",
+    "structural",
+    "framing",
+    "irc",
+    "nds",
+    "lvl",
+    "glulam",
+    "connectors",
+    "fireblocking",
+    "bim",
+    "aeco",
+    "3d",
+    "cad"
+  ]
+}
