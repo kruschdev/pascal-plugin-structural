@@ -69,6 +69,28 @@ export const DesignParamsSchema = z.object({
   storiesAbove: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(0),
 })
 
+export const VisibleSystemsSchema = z.object({
+  walls: z.boolean().default(true),
+  floor: z.boolean().default(true),
+  roof: z.boolean().default(true),
+  beams: z.boolean().default(true),
+  columns: z.boolean().default(true),
+  connectors: z.boolean().default(true),
+  firestop: z.boolean().default(true),
+  foundation: z.boolean().default(true),
+})
+
+export const DEFAULT_VISIBLE_SYSTEMS = {
+  walls: true,
+  floor: true,
+  roof: true,
+  beams: true,
+  columns: true,
+  connectors: true,
+  firestop: true,
+  foundation: true,
+}
+
 export const StructuralAssemblyNode = BaseNode.extend({
   id: objectId('strasm'),
   type: nodeType('structural:assembly'),
@@ -83,6 +105,7 @@ export const StructuralAssemblyNode = BaseNode.extend({
   roofSystem: RoofSystemEnum.default('stick-rafter'),
   designParams: DesignParamsSchema.default(DEFAULT_DESIGN_PARAMS),
   wallOverrides: z.record(z.string(), WallOverrideRuleSchema).default({}),
+  visibleSystems: VisibleSystemsSchema.default(DEFAULT_VISIBLE_SYSTEMS),
   footprintBounds: z.tuple([z.number(), z.number(), z.number(), z.number()]).default([0, 0, 9.144, 7.315]),
   wallHeightM: z.number().min(1.5).max(8).default(2.7432),
   xrayOpacity: z.number().min(0).max(1).default(0.25),
@@ -104,6 +127,19 @@ export function buildStructuralAssemblyGeometry(
 ): Group {
   const group = new Group()
   group.name = `structural-assembly-${node.id}`
+  const vis = node.visibleSystems ?? DEFAULT_VISIBLE_SYSTEMS
+  const isKindVisible =
+    (node.assemblyKind === 'wall-framing' || node.assemblyKind === 'braced-wall-line')
+      ? vis.walls !== false
+      : node.assemblyKind === 'floor-system'
+        ? vis.floor !== false
+        : node.assemblyKind === 'roof-system'
+          ? vis.roof !== false
+          : node.assemblyKind === 'foundation-system'
+            ? vis.foundation !== false
+            : true
+  if (!isKindVisible) return group
+
   const [minX, , maxX] = node.footprintBounds
   const previewLen = Math.max(2.4384, Math.min(6.0, Math.abs(maxX - minX)))
   group.add(
@@ -154,6 +190,7 @@ export const structuralAssemblyRenderDefinition: NodeDefinition<typeof Structura
     roofSystem: 'stick-rafter',
     designParams: { ...DEFAULT_DESIGN_PARAMS },
     wallOverrides: {},
+    visibleSystems: { ...DEFAULT_VISIBLE_SYSTEMS },
     footprintBounds: [0, 0, 9.144, 7.315],
     wallHeightM: 2.7432,
     xrayOpacity: 0.25,
@@ -167,7 +204,17 @@ export const structuralAssemblyRenderDefinition: NodeDefinition<typeof Structura
     snappable: {},
   },
   geometry: buildStructuralAssemblyGeometry,
-  geometryKey: (n) => JSON.stringify([n.assemblyKind, n.species, n.studSize, n.studSpacingIn, n.floorSystem, n.roofSystem, n.wallHeightM]),
+  geometryKey: (n) =>
+    JSON.stringify([
+      n.assemblyKind,
+      n.species,
+      n.studSize,
+      n.studSpacingIn,
+      n.floorSystem,
+      n.roofSystem,
+      n.wallHeightM,
+      n.visibleSystems,
+    ]),
   ports: getStructuralAssemblyPorts,
   floorplan: buildStructuralAssemblyFloorplan,
   presentation: {

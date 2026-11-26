@@ -116,7 +116,16 @@ export function autopopulateStructuralScene(
 
   const createdNodes: SceneNodeLike[] = []
   let seq = 1
-  const nextId = (prefix: string) => `${prefix}_${seq++}`
+  const levelTag = (levelId ?? 'lvl').replace(/[^a-zA-Z0-9]/g, '').slice(-8) || 'lvl'
+  const usedIds = new Set<string>(Object.keys(nodes))
+  const nextId = (prefix: string) => {
+    let candidate = `${prefix}_${levelTag}_${seq++}`
+    while (usedIds.has(candidate)) {
+      candidate = `${prefix}_${levelTag}_${seq++}`
+    }
+    usedIds.add(candidate)
+    return candidate
+  }
 
   // Determine overall footprint bounds (from slabs or walls)
   let minX = Number.POSITIVE_INFINITY
@@ -151,8 +160,8 @@ export function autopopulateStructuralScene(
   const defaultWallHeightM =
     walls.reduce((maxH, w) => Math.max(maxH, typeof w.height === 'number' ? w.height : 2.7432), 0) || 2.7432
 
-  // Evaluate braced wall lines to tag shear walls & hold-downs
-  const bwlReports = evaluateBracedWallLines({ nodes, design })
+  // Evaluate braced wall lines scoped to this level so multi-storey runs never duplicate hold-downs
+  const bwlReports = evaluateBracedWallLines({ nodes, design, levelId })
   const shearWallIds = new Set<string>()
   for (const bwl of bwlReports) {
     if (bwl.bracingMethod === 'Engineered-Shear' || bwl.bracingMethod === 'CS-WSP' || bwl.bracingMethod === 'CS-PF') {
@@ -216,12 +225,14 @@ export function autopopulateStructuralScene(
     deadLoadPsf: design.floorDeadLoadPsf,
   })
 
-  // 2. Roof system sizing
+  // 2. Roof system sizing (normalize pitch safely whether stored in radians <= 1.4 or degrees > 1.4)
   const firstRoof = roofs[0]
-  const roofPitchRise =
-    typeof firstRoof?.pitch === 'number'
-      ? Number((Math.tan(firstRoof.pitch) * 12).toFixed(1))
-      : 6
+  let roofPitchRise = 6
+  if (typeof firstRoof?.pitch === 'number' && Number.isFinite(firstRoof.pitch) && firstRoof.pitch >= 0) {
+    const rad = firstRoof.pitch > 1.4 ? (firstRoof.pitch * Math.PI) / 180 : firstRoof.pitch
+    const clampedRad = Math.min(rad, (75 * Math.PI) / 180)
+    roofPitchRise = Number((Math.tan(clampedRad) * 12).toFixed(1))
+  }
   const roofSizing = sizeRoofSystem({
     buildingSpanFt: shortSpanFt,
     ridgeLengthFt: longSpanFt,
@@ -311,13 +322,18 @@ export function autopopulateStructuralScene(
 
     const spanFt = opWidthM * METERS_TO_FEET
     const isBearing = wallOverrides[hostWall.id]?.isLoadBearing ?? true
+    const effTribFt = isBearing ? Number(Math.min(18, shortSpanFt / 2).toFixed(1)) : 2
+    const effLivePsf =
+      design.storiesAbove > 0
+        ? design.floorLiveLoadPsf
+        : Math.max(design.roofLiveLoadPsf, design.groundSnowPsf)
     const headerSizing = sizeBeamOrHeader({
       spanFt,
-      tributaryWidthFt: isBearing ? Math.min(18, shortSpanFt / 2) : 2,
+      tributaryWidthFt: effTribFt,
       role: 'header',
       preferredFamily: spanFt > 8 ? (options.preferredBeamFamily ?? 'lvl') : options.preferredBeamFamily,
       snowLoadPsf: design.groundSnowPsf,
-      liveLoadPsf: design.storiesAbove > 0 ? design.floorLiveLoadPsf : Math.max(20, design.groundSnowPsf),
+      liveLoadPsf: effLivePsf,
       deadLoadPsf: design.roofDeadLoadPsf,
       species: design.species,
       storiesSupported: design.storiesAbove,
@@ -345,8 +361,8 @@ export function autopopulateStructuralScene(
       depthIn: headerSizing.entry.depthIn,
       species: design.species,
       mountStyle: 'flush',
-      tributaryWidthFt: isBearing ? Number((shortSpanFt / 2).toFixed(1)) : 2,
-      liveLoadPsf: design.storiesAbove > 0 ? design.floorLiveLoadPsf : design.roofLiveLoadPsf,
+      tributaryWidthFt: effTribFt,
+      liveLoadPsf: effLivePsf,
       deadLoadPsf: design.roofDeadLoadPsf,
       snowLoadPsf: design.groundSnowPsf,
       bearingLengthIn: headerSizing.requiredBearingIn,
@@ -461,11 +477,11 @@ export function autopopulateStructuralScene(
           depthIn: colSizing.entry.depthIn,
           axialLoadLbs: colAxialLbs,
           transfersFromNodeId: girderId,
-          transfersToNodeId: `footing:${colId}`,
+          transfersToNodeId: includeFoundation ? `footing:${colId}` : undefined,
           hasSquashBlocks: floorSystem === 'tji-ijoist',
-          footingWidthIn: colSizing.footingWidthIn,
-          footingDepthIn: colSizing.footingDepthIn,
-          footingRebar: colSizing.footingRebar,
+          footingWidthIn: includeFoundation ? colSizing.footingWidthIn : 0,
+          footingDepthIn: includeFoundation ? colSizing.footingDepthIn : 0,
+          footingRebar: includeFoundation ? colSizing.footingRebar : 'Transfers to lower story',
         })
 
         // Post Cap (top of column to girder)
@@ -475,13 +491,15 @@ export function autopopulateStructuralScene(
           attachedNodeIds: [colId, girderId],
           name: `${colSizing.recommendedCapSku} Post-to-Girder Cap`,
         })
-        // Standoff Post Base (bottom of column to pad footing)
-        emitConnector({
-          sku: colSizing.recommendedBaseSku,
-          position: [px, -defaultWallHeightM, pz],
-          attachedNodeIds: [colId],
-          name: `${colSizing.recommendedBaseSku} Standoff Post Base`,
-        })
+        // Standoff Post Base (only when resting on foundation footing)
+        if (includeFoundation) {
+          emitConnector({
+            sku: colSizing.recommendedBaseSku,
+            position: [px, -defaultWallHeightM, pz],
+            attachedNodeIds: [colId],
+            name: `${colSizing.recommendedBaseSku} Standoff Post Base`,
+          })
+        }
       }
     }
   }
@@ -635,6 +653,13 @@ export function autopopulateStructuralScene(
     const perimFt = (footprintWidthFt + footprintDepthFt) * 2
     const boltSpacingFt = design.storiesAbove >= 2 || highSeismic ? 4 : 6
     const boltQty = Math.max(8, Math.ceil(perimFt / boltSpacingFt) + 4)
+    emitConnector({
+      sku: 'SSTB16',
+      position: [(minX + maxX) / 2, 0.04, minZ],
+      quantity: boltQty,
+      attachedNodeIds: [assemblyId],
+      name: `SSTB16 Foundation Sill Anchor Bolts (x${boltQty} @ ${boltSpacingFt}' OC, IRC R403.1.6)`,
+    })
     if (highSeismic) {
       emitConnector({
         sku: 'BP3x3',

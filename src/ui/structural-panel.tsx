@@ -5,7 +5,7 @@
 
 import { type AnyNode, runAsSingleSceneHistoryStep } from '@pascal-app/core'
 import { openEditorView, useScene, useViewer } from '@pascal-app/editor'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { structuralAgentOperations } from '../agent-operations'
 import { auditStructuralScene } from '../irc/audit'
 import type {
@@ -23,29 +23,81 @@ import type {
 } from '../irc/tables'
 import {
   type StructuralLayerKey,
-  selectDesignParamsFromUi,
+  type StructuralScheduleTab,
   useStructuralUi,
 } from './store'
 
 export const STRUCTURAL_SCHEDULE_VIEW_ID = 'krusch:structural:schedule'
 
-function activeLevelOf(
+const ASSEMBLY_LAYER_KEYS: ReadonlySet<StructuralLayerKey> = new Set([
+  'walls',
+  'floor',
+  'roof',
+  'foundation',
+])
+
+export function activeLevelOf(
   nodes: Readonly<Record<string, AnyNode>>,
   selectedLevelId: string | null,
 ): string | null {
-  if (selectedLevelId && nodes[selectedLevelId]) return selectedLevelId
+  if (selectedLevelId && nodes[selectedLevelId]?.type === 'level') return selectedLevelId
   for (const n of Object.values(nodes)) {
     if (n.type === 'level') return n.id
   }
   return null
 }
 
-function toPascalNode(node: SceneNodeLike, fallbackLevelId: string | null): AnyNode {
+export function belongsToLevel(
+  record: Readonly<Record<string, SceneNodeLike>>,
+  node: SceneNodeLike,
+  levelId: string | null,
+): boolean {
+  if (!levelId) return true
+  let cur: SceneNodeLike | undefined = node
+  const seen = new Set<string>()
+  while (cur?.parentId && !seen.has(cur.id)) {
+    if (cur.parentId === levelId) return true
+    seen.add(cur.id)
+    cur = record[cur.parentId]
+    if (cur?.type === 'level') return cur.id === levelId
+  }
+  return false
+}
+
+function layerForNodeType(type: string): StructuralLayerKey | null {
+  if (type === 'structural:beam') return 'beams'
+  if (type === 'structural:column') return 'columns'
+  if (type === 'structural:connector') return 'connectors'
+  if (type === 'structural:firestop') return 'firestop'
+  return null
+}
+
+export function toPascalNode(
+  node: SceneNodeLike,
+  fallbackLevelId: string | null,
+  hiddenLayers?: Readonly<Record<StructuralLayerKey, boolean>>,
+): AnyNode {
+  const layer = layerForNodeType(node.type)
+  const visible = layer && hiddenLayers ? !hiddenLayers[layer] : true
+  const extra: Record<string, unknown> = {}
+  if (node.type === 'structural:assembly' && hiddenLayers) {
+    extra.visibleSystems = {
+      walls: !hiddenLayers.walls,
+      floor: !hiddenLayers.floor,
+      roof: !hiddenLayers.roof,
+      beams: !hiddenLayers.beams,
+      columns: !hiddenLayers.columns,
+      connectors: !hiddenLayers.connectors,
+      firestop: !hiddenLayers.firestop,
+      foundation: !hiddenLayers.foundation,
+    }
+  }
   return {
     object: 'node',
-    visible: true,
     metadata: {},
     ...node,
+    ...extra,
+    visible,
     parentId: node.parentId ?? fallbackLevelId,
   } as unknown as AnyNode
 }
@@ -104,13 +156,80 @@ export default function StructuralHostPanel() {
   const updateNodes = useScene((s) => s.updateNodes)
   const selectedLevelId = useViewer((s) => s.selection.levelId)
 
-  const ui = useStructuralUi()
+  const codeEdition = useStructuralUi((s) => s.codeEdition)
+  const species = useStructuralUi((s) => s.species)
+  const studSize = useStructuralUi((s) => s.studSize)
+  const studSpacingIn = useStructuralUi((s) => s.studSpacingIn)
+  const floorSystem = useStructuralUi((s) => s.floorSystem)
+  const roofSystem = useStructuralUi((s) => s.roofSystem)
+  const groundSnowPsf = useStructuralUi((s) => s.groundSnowPsf)
+  const windMph = useStructuralUi((s) => s.windMph)
+  const exposure = useStructuralUi((s) => s.exposure)
+  const seismicCategory = useStructuralUi((s) => s.seismicCategory)
+  const frostDepthIn = useStructuralUi((s) => s.frostDepthIn)
+  const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
+  const preferredBeamFamily = useStructuralUi((s) => s.preferredBeamFamily)
+  const preferredColumnType = useStructuralUi((s) => s.preferredColumnType)
+  const hiddenLayers = useStructuralUi((s) => s.hiddenLayers)
+  const setSpecies = useStructuralUi((s) => s.setSpecies)
+  const setStudSize = useStructuralUi((s) => s.setStudSize)
+  const setStudSpacingIn = useStructuralUi((s) => s.setStudSpacingIn)
+  const setFloorSystem = useStructuralUi((s) => s.setFloorSystem)
+  const setRoofSystem = useStructuralUi((s) => s.setRoofSystem)
+  const setGroundSnowPsf = useStructuralUi((s) => s.setGroundSnowPsf)
+  const setWindMph = useStructuralUi((s) => s.setWindMph)
+  const setExposure = useStructuralUi((s) => s.setExposure)
+  const setSeismicCategory = useStructuralUi((s) => s.setSeismicCategory)
+  const setPreferredBeamFamily = useStructuralUi((s) => s.setPreferredBeamFamily)
+  const setPreferredColumnType = useStructuralUi((s) => s.setPreferredColumnType)
+  const setActiveTab = useStructuralUi((s) => s.setActiveTab)
+  const toggleLayerVisibility = useStructuralUi((s) => s.toggleLayerVisibility)
+
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [placeIdx, setPlaceIdx] = useState(0)
+  const [snowDraft, setSnowDraft] = useState(String(groundSnowPsf))
+  const [windDraft, setWindDraft] = useState(String(windMph))
+
+  useEffect(() => setSnowDraft(String(groundSnowPsf)), [groundSnowPsf])
+  useEffect(() => setWindDraft(String(windMph)), [windMph])
+
+  const commitSnowDraft = (rawVal: string) => {
+    const parsed = Number(rawVal)
+    if (rawVal.trim() !== '' && Number.isFinite(parsed)) {
+      const clamped = Math.max(0, Math.min(200, parsed))
+      setGroundSnowPsf(clamped)
+      setSnowDraft(String(clamped))
+    } else {
+      setSnowDraft(String(groundSnowPsf))
+    }
+  }
+
+  const commitWindDraft = (rawVal: string) => {
+    const parsed = Number(rawVal)
+    if (rawVal.trim() !== '' && Number.isFinite(parsed)) {
+      const clamped = Math.max(85, Math.min(200, parsed))
+      setWindMph(clamped)
+      setWindDraft(String(clamped))
+    } else {
+      setWindDraft(String(windMph))
+    }
+  }
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
   const levelId = activeLevelOf(nodes, selectedLevelId)
-  const designParams = useMemo(() => selectDesignParamsFromUi(ui), [ui])
+  const designParams = useMemo(
+    () => ({
+      codeEdition,
+      species,
+      groundSnowPsf,
+      windMph,
+      exposure,
+      seismicCategory,
+      frostDepthIn,
+      soilBearingPsf,
+    }),
+    [codeEdition, species, groundSnowPsf, windMph, exposure, seismicCategory, frostDepthIn, soilBearingPsf],
+  )
   const audit = useMemo(() => auditStructuralScene(record, designParams), [record, designParams])
 
   const counts = useMemo(() => {
@@ -130,11 +249,11 @@ export default function StructuralHostPanel() {
   const commitCreatedNodes = (created: ReadonlyArray<SceneNodeLike>, clearExistingStructural = false) => {
     const existingIds = clearExistingStructural
       ? Object.values(record)
-          .filter((n) => n.type.startsWith('structural:'))
+          .filter((n) => n.type.startsWith('structural:') && belongsToLevel(record, n, levelId))
           .map((n) => n.id)
       : []
     const ops = created.map((n) => ({
-      node: toPascalNode(n, levelId),
+      node: toPascalNode(n, levelId, hiddenLayers),
       parentId: (n.parentId ?? levelId ?? undefined) as never,
     }))
     runAsSingleSceneHistoryStep(useScene, () => {
@@ -154,12 +273,12 @@ export default function StructuralHostPanel() {
     }
     const outcome = structuralAgentOperations.structural_autopopulate_irc(record, {
       levelId,
-      studSize: ui.studSize,
-      studSpacingIn: ui.studSpacingIn,
-      floorSystem: ui.floorSystem,
-      roofSystem: ui.roofSystem,
-      preferredBeamFamily: ui.preferredBeamFamily,
-      preferredColumnType: ui.preferredColumnType,
+      studSize,
+      studSpacingIn,
+      floorSystem,
+      roofSystem,
+      preferredBeamFamily,
+      preferredColumnType,
       includeRoof: true,
       includeFoundation: true,
       includeFireblocking: true,
@@ -171,18 +290,18 @@ export default function StructuralHostPanel() {
 
   const clearStructural = () => {
     const ids = Object.values(record)
-      .filter((n) => n.type.startsWith('structural:'))
+      .filter((n) => n.type.startsWith('structural:') && belongsToLevel(record, n, levelId))
       .map((n) => n.id)
     if (ids.length === 0) return
     runAsSingleSceneHistoryStep(useScene, () => {
       deleteNodes(ids as never)
     })
-    setStatusMsg(`Cleared ${ids.length} structural node(s).`)
+    setStatusMsg(`Cleared ${ids.length} structural node(s)${levelId ? ' on active level' : ''}.`)
   }
 
   const toggleLayer = (layer: StructuralLayerKey) => {
-    const willHide = !ui.hiddenLayers[layer]
-    ui.toggleLayerVisibility(layer)
+    const willHide = !hiddenLayers[layer]
+    toggleLayerVisibility(layer)
     const updates: Array<{ id: string; data: Record<string, unknown> }> = []
     for (const n of Object.values(record)) {
       if (layer === 'beams' && n.type === 'structural:beam') {
@@ -193,7 +312,7 @@ export default function StructuralHostPanel() {
         updates.push({ id: n.id, data: { visible: !willHide } })
       } else if (layer === 'firestop' && n.type === 'structural:firestop') {
         updates.push({ id: n.id, data: { visible: !willHide } })
-      } else if (n.type === 'structural:assembly') {
+      } else if (n.type === 'structural:assembly' && ASSEMBLY_LAYER_KEYS.has(layer)) {
         const prevVis = (n.visibleSystems as Record<string, boolean> | undefined) ?? {}
         updates.push({
           id: n.id,
@@ -202,7 +321,9 @@ export default function StructuralHostPanel() {
       }
     }
     if (updates.length > 0) {
-      updateNodes(updates as never)
+      runAsSingleSceneHistoryStep(useScene, () => {
+        updateNodes(updates as never)
+      })
     }
   }
 
@@ -213,7 +334,7 @@ export default function StructuralHostPanel() {
     }
     const offset = (placeIdx % 5) * 0.6
     setPlaceIdx((i) => i + 1)
-    ui.setPreferredBeamFamily(family)
+    setPreferredBeamFamily(family)
     const outcome = structuralAgentOperations.structural_place_beam(record, {
       levelId,
       start: [0.5, 1.0 + offset],
@@ -221,8 +342,8 @@ export default function StructuralHostPanel() {
       elevationY: 2.4,
       role: 'floor-girder',
       preferredFamily: family,
-      species: ui.species,
-      snowLoadPsf: ui.groundSnowPsf,
+      species,
+      snowLoadPsf: groundSnowPsf,
       autoPlaceHangers: true,
     })
     commitCreatedNodes(outcome.createdNodes ?? [], false)
@@ -236,16 +357,16 @@ export default function StructuralHostPanel() {
     }
     const offset = (placeIdx % 6) * 0.5
     setPlaceIdx((i) => i + 1)
-    ui.setPreferredColumnType(columnType)
+    setPreferredColumnType(columnType)
     const outcome = structuralAgentOperations.structural_place_column(record, {
       levelId,
       position: [1.0 + offset, 0, 1.0 + offset],
       heightM: 2.7432,
       axialLoadLbs: columnType === 'steel-hss' ? 24000 : columnType === 'psl' ? 16000 : 10000,
       preferredType: columnType,
-      soilBearingPsf: ui.soilBearingPsf,
-      frostDepthIn: ui.frostDepthIn,
-      hasSquashBlocks: ui.floorSystem === 'tji-ijoist',
+      soilBearingPsf,
+      frostDepthIn,
+      hasSquashBlocks: floorSystem === 'tji-ijoist',
       autoPlaceBaseAndCap: true,
     })
     commitCreatedNodes(outcome.createdNodes ?? [], false)
@@ -291,8 +412,8 @@ export default function StructuralHostPanel() {
     setStatusMsg(outcome.text)
   }
 
-  const openSchedule = (tab?: Parameters<typeof ui.setActiveTab>[0]) => {
-    if (tab) ui.setActiveTab(tab)
+  const openSchedule = (tab?: StructuralScheduleTab) => {
+    if (tab) setActiveTab(tab)
     openEditorView(STRUCTURAL_SCHEDULE_VIEW_ID, { beside: true })
   }
 
@@ -300,7 +421,7 @@ export default function StructuralHostPanel() {
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-        <strong style={{ fontSize: 13 }}>Structural ({ui.codeEdition})</strong>
+        <strong style={{ fontSize: 13 }}>Structural ({codeEdition})</strong>
         <button type="button" onClick={() => openSchedule()} style={primaryBtnStyle}>
           Schedule &amp; Audit
         </button>
@@ -313,8 +434,8 @@ export default function StructuralHostPanel() {
           <label style={fieldLabelStyle}>
             <span>Species (#2)</span>
             <select
-              value={ui.species}
-              onChange={(e) => ui.setSpecies(e.target.value as LumberSpecies)}
+              value={species}
+              onChange={(e) => setSpecies(e.target.value as LumberSpecies)}
               style={selectStyle}
             >
               <option value="df-l-2">DF-L #2</option>
@@ -328,16 +449,16 @@ export default function StructuralHostPanel() {
             <span>Wall Framing</span>
             <div style={{ display: 'flex', gap: 4 }}>
               <select
-                value={ui.studSize}
-                onChange={(e) => ui.setStudSize(e.target.value as StudSize)}
+                value={studSize}
+                onChange={(e) => setStudSize(e.target.value as StudSize)}
                 style={{ ...selectStyle, flex: 1 }}
               >
                 <option value="2x4">2x4</option>
                 <option value="2x6">2x6</option>
               </select>
               <select
-                value={ui.studSpacingIn}
-                onChange={(e) => ui.setStudSpacingIn(Number(e.target.value) as StudSpacingIn)}
+                value={studSpacingIn}
+                onChange={(e) => setStudSpacingIn(Number(e.target.value) as StudSpacingIn)}
                 style={{ ...selectStyle, flex: 1 }}
               >
                 <option value={12}>12&quot;</option>
@@ -350,8 +471,8 @@ export default function StructuralHostPanel() {
           <label style={fieldLabelStyle}>
             <span>Floor System</span>
             <select
-              value={ui.floorSystem}
-              onChange={(e) => ui.setFloorSystem(e.target.value as FloorSystemKind)}
+              value={floorSystem}
+              onChange={(e) => setFloorSystem(e.target.value as FloorSystemKind)}
               style={selectStyle}
             >
               <option value="dimensional">Dimensional</option>
@@ -363,8 +484,8 @@ export default function StructuralHostPanel() {
           <label style={fieldLabelStyle}>
             <span>Roof System</span>
             <select
-              value={ui.roofSystem}
-              onChange={(e) => ui.setRoofSystem(e.target.value as RoofSystemKind)}
+              value={roofSystem}
+              onChange={(e) => setRoofSystem(e.target.value as RoofSystemKind)}
               style={selectStyle}
             >
               <option value="stick-rafter">Stick Rafter</option>
@@ -382,8 +503,16 @@ export default function StructuralHostPanel() {
               min={0}
               max={200}
               step={5}
-              value={ui.groundSnowPsf}
-              onChange={(e) => ui.setGroundSnowPsf(Number(e.target.value) || 0)}
+              value={snowDraft}
+              onChange={(e) => {
+                const raw = e.target.value
+                setSnowDraft(raw)
+                const parsed = Number(raw)
+                if (raw.trim() !== '' && Number.isFinite(parsed) && parsed >= 0 && parsed <= 200) {
+                  setGroundSnowPsf(parsed)
+                }
+              }}
+              onBlur={(e) => commitSnowDraft(e.target.value)}
               style={selectStyle}
             />
           </label>
@@ -395,8 +524,16 @@ export default function StructuralHostPanel() {
               min={85}
               max={200}
               step={5}
-              value={ui.windMph}
-              onChange={(e) => ui.setWindMph(Number(e.target.value) || 115)}
+              value={windDraft}
+              onChange={(e) => {
+                const raw = e.target.value
+                setWindDraft(raw)
+                const parsed = Number(raw)
+                if (raw.trim() !== '' && Number.isFinite(parsed) && parsed >= 85 && parsed <= 200) {
+                  setWindMph(parsed)
+                }
+              }}
+              onBlur={(e) => commitWindDraft(e.target.value)}
               style={selectStyle}
             />
           </label>
@@ -404,8 +541,8 @@ export default function StructuralHostPanel() {
           <label style={fieldLabelStyle}>
             <span>Seismic (SDC)</span>
             <select
-              value={ui.seismicCategory}
-              onChange={(e) => ui.setSeismicCategory(e.target.value as SeismicCategory)}
+              value={seismicCategory}
+              onChange={(e) => setSeismicCategory(e.target.value as SeismicCategory)}
               style={selectStyle}
             >
               <option value="A">SDC A</option>
@@ -420,8 +557,8 @@ export default function StructuralHostPanel() {
           <label style={fieldLabelStyle}>
             <span>Wind Exposure</span>
             <select
-              value={ui.exposure}
-              onChange={(e) => ui.setExposure(e.target.value as ExposureCategory)}
+              value={exposure}
+              onChange={(e) => setExposure(e.target.value as ExposureCategory)}
               style={selectStyle}
             >
               <option value="B">Exp B (Suburban)</option>
@@ -493,7 +630,7 @@ export default function StructuralHostPanel() {
         <div style={{ fontWeight: 600, fontSize: 11 }}>Structural Layers</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
           {LAYER_TOGGLES.map((layer) => {
-            const hidden = ui.hiddenLayers[layer.key]
+            const hidden = hiddenLayers[layer.key]
             return (
               <button
                 key={layer.key}

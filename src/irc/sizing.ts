@@ -91,18 +91,31 @@ export function checkBeamEntry(
     input.role === 'hip-beam' ||
     input.role === 'valley-beam' ||
     input.role === 'porch-beam'
-  const livePsf = input.liveLoadPsf ?? (isRoof ? Math.max(20, input.snowLoadPsf ?? 30) : 40)
-  const deadPsf = input.deadLoadPsf ?? (isRoof ? 12 : 10)
+  const isHeader = input.role === 'header'
+  const snowPsf = Math.max(0, input.snowLoadPsf ?? (isRoof ? 30 : 0))
+  const stories = input.storiesSupported ?? 0
+  let livePsf: number
+  if (isRoof) {
+    livePsf = Math.max(input.liveLoadPsf ?? 20, snowPsf)
+  } else if (isHeader) {
+    // Exterior/bearing headers carry roof snow + any floor live loads above
+    const baseRoofLive = Math.max(20, snowPsf)
+    const floorLive = input.liveLoadPsf ?? 40
+    livePsf = stories > 0 ? floorLive * stories * 0.85 + baseRoofLive : Math.max(input.liveLoadPsf ?? 20, snowPsf)
+  } else {
+    livePsf = (input.liveLoadPsf ?? 40) * (1 + stories * 0.85)
+  }
+  const deadPsf = (input.deadLoadPsf ?? (isRoof ? 12 : 10)) * (1 + stories * 0.85)
   const tribFt = Math.max(1, input.tributaryWidthFt)
-  const storiesMultiplier = 1 + (input.storiesSupported ?? 0) * 0.85
 
-  const liveLoadPlf = livePsf * tribFt * storiesMultiplier
-  const deadLoadPlf = deadPsf * tribFt * storiesMultiplier + entry.weightPlf
+  const liveLoadPlf = livePsf * tribFt
+  const deadLoadPlf = deadPsf * tribFt + entry.weightPlf
   const uniformLoadPlf = liveLoadPlf + deadLoadPlf
   const pointLoadLbs = Math.max(0, input.pointLoadLbs ?? 0)
 
-  // Snow load duration factor Cd = 1.15 for wood roofs with snow >= 20 psf
-  const cdFactor = entry.family === 'steel-w' ? 1.0 : isRoof && (input.snowLoadPsf ?? 0) >= 20 ? 1.15 : 1.0
+  // NDS 2.3.2 load duration factor: Cd = 1.15 when snow governs on wood roof/header (stories === 0)
+  const snowGoverns = (isRoof || (isHeader && stories === 0)) && snowPsf >= 20 && snowPsf >= (input.liveLoadPsf ?? 0)
+  const cdFactor = entry.family === 'steel-w' ? 1.0 : snowGoverns ? 1.15 : 1.0
 
   const momentFtLbs = (uniformLoadPlf * spanFt * spanFt) / 8 + (pointLoadLbs * spanFt) / 4
   const shearLbs = (uniformLoadPlf * spanFt) / 2 + pointLoadLbs / 2
@@ -139,10 +152,11 @@ export function checkBeamEntry(
   const calcBearingIn = shearLbs / Math.max(1, entry.widthIn * bearingStressPsi)
   const requiredBearingIn = Number(Math.max(minCodeBearing, calcBearingIn).toFixed(2))
 
-  // Jack stud count per IRC Table R602.7(1)/(2)/(3) + reaction bearing check
-  // Each 2x4/2x6 DF-L jack stud offers ~1.5" bearing width; heavy reactions require 2–4 jacks
+  // Jack stud count per IRC Table R602.7(1)/(2)/(3) + wood bearing reaction check.
+  // On masonry bearings (3.0" min per R502.6), do not force 2 wood jack studs from the masonry floor.
+  const woodBearingForJacks = input.bearingMaterial === 'masonry' ? Math.max(1.5, calcBearingIn) : requiredBearingIn
   const rawJacks = Math.max(
-    Math.ceil(requiredBearingIn / 1.5),
+    Math.ceil(woodBearingForJacks / 1.5),
     spanFt > 12 ? 3 : spanFt > 8 ? 2 : spanFt > 5.5 && (input.storiesSupported ?? 0) >= 1 ? 2 : 1,
   )
   const jackStudsEachEnd = Math.min(4, Math.max(1, rawJacks)) as 1 | 2 | 3 | 4
@@ -194,14 +208,80 @@ export function checkBeamEntry(
   }
 }
 
+/**
+ * Resolve a beam node's catalog entry with exact designation precedence,
+ * or synthesize exact section properties (S = bd^2/6, I = bd^3/12) when custom
+ * dimensions were edited in the Parametric Inspector (never silently falling back to 2x8).
+ */
+export function resolveBeamCatalogEntry(params: {
+  designation?: string
+  family?: BeamMaterialFamily
+  widthIn?: number
+  depthIn?: number
+  plyCount?: number
+}): BeamCatalogEntry {
+  const family = params.family ?? 'lvl'
+  const w = typeof params.widthIn === 'number' && Number.isFinite(params.widthIn) && params.widthIn > 0 ? params.widthIn : undefined
+  const d = typeof params.depthIn === 'number' && Number.isFinite(params.depthIn) && params.depthIn > 0 ? params.depthIn : undefined
+
+  if (params.designation) {
+    const exact = BEAM_CATALOG.find((c) => c.designation === params.designation)
+    if (exact && (!w || Math.abs(exact.widthIn - w) < 0.35) && (!d || Math.abs(exact.depthIn - d) < 0.5)) {
+      return exact
+    }
+  }
+  if (w !== undefined && d !== undefined) {
+    const close = BEAM_CATALOG.find(
+      (c) => c.family === family && Math.abs(c.widthIn - w) < 0.35 && Math.abs(c.depthIn - d) < 0.5,
+    )
+    if (close) return close
+
+    // Synthesize exact custom section properties matching the family's reference material
+    const propsByFamily: Record<BeamMaterialFamily, { fb: number; fv: number; e: number; fcPerp: number; pcf: number; costScale: number }> = {
+      'dimensional-built-up': { fb: 950, fv: 180, e: 1_600_000, fcPerp: 625, pcf: 35, costScale: 0.28 },
+      lsl: { fb: 2325, fv: 310, e: 1_550_000, fcPerp: 900, pcf: 44, costScale: 0.45 },
+      lvl: { fb: 2600, fv: 285, e: 2_000_000, fcPerp: 750, pcf: 42, costScale: 0.58 },
+      psl: { fb: 2850, fv: 290, e: 2_000_000, fcPerp: 750, pcf: 45, costScale: 0.72 },
+      glulam: { fb: 2350, fv: 265, e: 1_800_000, fcPerp: 650, pcf: 36, costScale: 0.64 },
+      flitch: { fb: 3200, fv: 380, e: 3_400_000, fcPerp: 625, pcf: 65, costScale: 1.45 },
+      'steel-w': { fb: 30_000, fv: 18_000, e: 29_000_000, fcPerp: 20_000, pcf: 140, costScale: 1.8 },
+    }
+    const p = propsByFamily[family]
+    const effArea = family === 'steel-w' ? w * d * 0.16 : w * d
+    const sIn3 = family === 'steel-w' ? (w * d * d) / 20 : (w * d * d) / 6
+    const iIn4 = family === 'steel-w' ? (w * d * d * d) / 36 : (w * d * d * d) / 12
+    return {
+      id: `custom-${family}-${w}x${d}`,
+      family,
+      designation: params.designation ?? `Custom ${w}"x${d}" ${family.toUpperCase()}`,
+      plyCount: params.plyCount ?? 1,
+      widthIn: w,
+      depthIn: d,
+      allowableMomentFtLbs: Math.round((p.fb * sIn3) / 12),
+      allowableShearLbs: Math.round((2 / 3) * p.fv * effArea),
+      eiLbIn2: Math.round(p.e * iIn4),
+      bearingPsi: p.fcPerp,
+      weightPlf: Number(((effArea / 144) * p.pcf).toFixed(1)),
+      costPerLfUsd: Number(Math.max(6, w * d * p.costScale).toFixed(2)),
+    }
+  }
+  return BEAM_CATALOG.find((c) => c.family === family) ?? BEAM_CATALOG[0]!
+}
+
 export function selectBeamHangerSku(entry: BeamCatalogEntry, reactionLbs: number): string {
+  if (entry.family === 'steel-w') {
+    return entry.widthIn >= 5.5 ? 'CCQ66' : 'CCQ46'
+  }
   if (entry.family === 'glulam' && entry.widthIn <= 3.75 && reactionLbs <= 5900) return 'HUCQ410-SDS'
   if (entry.widthIn >= 5.0) {
-    return reactionLbs > 7500 ? 'HGUS5.50/12' : 'HHUS5.50/10'
+    return reactionLbs > 7500 || entry.depthIn >= 14 ? 'HGUS5.50/12' : 'HHUS5.50/10'
   }
   if (entry.widthIn >= 3.25) {
-    return reactionLbs > 5400 ? 'HHUS410' : 'HHUS210-2'
+    return reactionLbs > 5400 || entry.depthIn >= 11.875 ? 'HHUS410' : 'HHUS210-2'
   }
+  if (entry.depthIn <= 6.0) return 'LUS26'
+  if (entry.depthIn <= 8.0) return 'LUS28'
+  if (entry.depthIn >= 11.0 && reactionLbs <= 1965) return 'LUS212'
   return reactionLbs > 1800 ? 'HUS210' : 'LUS210'
 }
 
@@ -210,36 +290,42 @@ export function selectBeamHangerSku(entry: BeamCatalogEntry, reactionLbs: number
  * LVL, LSL, PSL, Glulam, Flitch, and A992 Steel W-beam families.
  */
 export function sizeBeamOrHeader(input: BeamSizingInput): BeamCheckResult {
-  let candidates = [...BEAM_CATALOG]
+  const depthFilter = (list: BeamCatalogEntry[]) => {
+    if (input.maxDepthIn === undefined) return list
+    const fit = list.filter((c) => c.depthIn <= input.maxDepthIn! + 0.05)
+    return fit.length > 0 ? fit : list
+  }
+
+  let candidates = depthFilter([...BEAM_CATALOG])
   if (input.preferredFamily) {
     const filtered = candidates.filter((c) => c.family === input.preferredFamily)
     if (filtered.length > 0) candidates = filtered
   }
-  if (input.maxDepthIn !== undefined) {
-    const depthFit = candidates.filter((c) => c.depthIn <= input.maxDepthIn! + 0.05)
-    if (depthFit.length > 0) candidates = depthFit
-  }
 
-  // Sort by cost per linear foot ascending so we pick the leanest passing member
   candidates.sort((a, b) => a.costPerLfUsd - b.costPerLfUsd)
-
   for (const cand of candidates) {
     const check = checkBeamEntry(cand, input)
     if (check.passes) return check
   }
 
-  // If preferred family exhausted, escalate across full catalog (LVL -> PSL -> Steel)
+  // If preferred family exhausted, escalate across full catalog while preserving maxDepthIn!
   if (input.preferredFamily) {
-    const full = [...BEAM_CATALOG].sort((a, b) => a.costPerLfUsd - b.costPerLfUsd)
+    const full = depthFilter([...BEAM_CATALOG]).sort((a, b) => a.costPerLfUsd - b.costPerLfUsd)
     for (const cand of full) {
       const check = checkBeamEntry(cand, input)
       if (check.passes) return check
     }
   }
 
-  // Return strongest candidate with overstress warnings
-  const strongest = [...BEAM_CATALOG].sort((a, b) => b.allowableMomentFtLbs - a.allowableMomentFtLbs)[0]!
-  return checkBeamEntry(strongest, input)
+  // Return lowest-utilization candidate from the depth-compliant pool
+  const pool = depthFilter([...BEAM_CATALOG])
+  const checked = pool.map((c) => checkBeamEntry(c, input))
+  checked.sort(
+    (a, b) =>
+      Math.max(a.bendingUtilization, a.shearUtilization) -
+      Math.max(b.bendingUtilization, b.shearUtilization),
+  )
+  return checked[0]!
 }
 
 // ============================================================================
@@ -465,12 +551,14 @@ export function sizeRoofSystem(params: {
   const sizes: Array<'2x6' | '2x8' | '2x10' | '2x12'> = ['2x6', '2x8', '2x10', '2x12']
   const chosenRafter = sizes.find((s) => rafterTable[s][spacingIn] >= halfSpanFt) ?? '2x12'
   const maxRunFt = rafterTable[chosenRafter][spacingIn]
-  const chosenCj = sizes.find((s) => cjTable[s][16] >= halfSpanFt) ?? '2x12'
+  const chosenCj = sizes.find((s) => cjTable[s][spacingIn] >= halfSpanFt) ?? '2x12'
 
   const needsStructuralRidgeBeam =
     params.system === 'ridge-beam-cathedral' || params.pitchRiseOver12 < 3
   const needsPurlinAndStruts = !needsStructuralRidgeBeam && halfSpanFt > maxRunFt
 
+  // Slope dead-load magnification sec(theta) = sqrt(1 + (pitch/12)^2) for sloped roofs
+  const slopeSec = Math.hypot(1, params.pitchRiseOver12 / 12)
   const recommendedRidgeBeam = needsStructuralRidgeBeam
     ? sizeBeamOrHeader({
         spanFt: Math.min(params.ridgeLengthFt, 20),
@@ -478,7 +566,7 @@ export function sizeRoofSystem(params: {
         role: 'ridge-beam',
         preferredFamily: params.ridgeLengthFt > 14 ? 'glulam' : 'lvl',
         snowLoadPsf: design.groundSnowPsf,
-        deadLoadPsf: design.roofDeadLoadPsf,
+        deadLoadPsf: Number((design.roofDeadLoadPsf * slopeSec).toFixed(1)),
         species: design.species,
       })
     : undefined
@@ -519,6 +607,121 @@ export type ColumnSizingResult = {
   codeRef: string
 }
 
+/**
+ * Compute ASD axial compression capacity (lbs) for a column at unbracedHeightFt:
+ * - Steel HSS / Lally: AISC 360 Chapter E (E3 flexural buckling with KL/r <= 200, Omega_c = 1.67)
+ * - Wood / PSL / Glulam: AWC NDS 3.7 Cp Euler buckling formula (Le/d <= 50)
+ */
+export function calcColumnCapacityLbs(col: ColumnCatalogEntry, unbracedHeightFt: number): number {
+  const hFt = Math.max(1, unbracedHeightFt)
+  if (col.columnType === 'steel-hss' || col.columnType === 'steel-lally') {
+    const dMin = Math.min(col.widthIn, col.depthIn)
+    // Radius of gyration approximation: hollow square HSS r ≈ 0.39*d, round pipe r ≈ 0.33*d
+    const rIn = col.columnType === 'steel-lally' ? 0.33 * dMin : 0.39 * dMin
+    const klOverR = (hFt * 12) / Math.max(0.5, rIn)
+    if (klOverR > 200) return 0
+    const fy = col.columnType === 'steel-lally' ? 35_000 : 46_000
+    const fe = (Math.PI * Math.PI * 29_000_000) / (klOverR * klOverR)
+    const fcr = fy / fe <= 2.25 ? Math.pow(0.658, fy / fe) * fy : 0.877 * fe
+    const pAllow = (fcr * col.areaIn2) / 1.67
+    return Math.round(pAllow)
+  }
+  // NDS 3.7 Cp Euler buckling formula
+  const dMin = Math.min(col.widthIn, col.depthIn)
+  const leOverD = (hFt * 12) / dMin
+  if (leOverD > 50) return 0
+  const fcStar = col.fcPsi
+  const fcE = (0.822 * col.eMinPsi) / (leOverD * leOverD)
+  const ratio = fcE / fcStar
+  const c = col.columnType === 'psl' || col.columnType === 'glulam' ? 0.9 : 0.8
+  const term = (1 + ratio) / (2 * c)
+  const cp = term - Math.sqrt(Math.max(0, term * term - ratio / c))
+  return Math.round(fcStar * cp * col.areaIn2)
+}
+
+/**
+ * Resolve an existing placed column's catalog entry or synthesize section properties
+ * for auditing its actual structural buckling capacity.
+ */
+export function resolveColumnCatalogEntry(params: {
+  designation?: string
+  columnType?: ColumnType
+  widthIn?: number
+  depthIn?: number
+}): ColumnCatalogEntry {
+  if (params.designation) {
+    const exact = COLUMN_CATALOG.find((c) => c.designation === params.designation)
+    if (exact) return exact
+  }
+  const type = params.columnType ?? 'wood-solid'
+  const w = typeof params.widthIn === 'number' && params.widthIn > 0 ? params.widthIn : undefined
+  const d = typeof params.depthIn === 'number' && params.depthIn > 0 ? params.depthIn : undefined
+  if (w !== undefined && d !== undefined) {
+    const close = COLUMN_CATALOG.find(
+      (c) => c.columnType === type && Math.abs(c.widthIn - w) < 0.35 && Math.abs(c.depthIn - d) < 0.35,
+    )
+    if (close) return close
+    const areaIn2 = type === 'steel-hss' ? Math.max(2, (w + d) * 0.45) : type === 'steel-lally' ? Math.max(1.8, w * 0.65) : w * d
+    const fcPsi = type === 'psl' ? 2500 : type === 'glulam' ? 1900 : type.startsWith('steel') ? 30_000 : 1350
+    const eMinPsi = type === 'psl' ? 910_000 : type === 'glulam' ? 850_000 : type.startsWith('steel') ? 29_000_000 : 580_000
+    return {
+      id: `custom-${type}-${w}x${d}`,
+      columnType: type,
+      designation: params.designation ?? `Custom ${w}"x${d}" ${type}`,
+      widthIn: w,
+      depthIn: d,
+      areaIn2,
+      fcPsi,
+      eMinPsi,
+      allowableAxial9FtLbs: 0,
+      recommendedBaseSku: w >= 5 ? 'ABU66Z' : 'ABU44Z',
+      recommendedCapSku: w >= 5 ? 'CCQ66' : 'BC4',
+      costPerLfUsd: 12,
+    }
+  }
+  return COLUMN_CATALOG.find((c) => c.columnType === type) ?? COLUMN_CATALOG[0]!
+}
+
+/**
+ * Audit a specific placed column's actual buckling capacity + required spread pad footing.
+ */
+export function checkColumnEntry(params: {
+  designation?: string
+  columnType?: ColumnType
+  widthIn?: number
+  depthIn?: number
+  axialLoadLbs: number
+  unbracedHeightFt: number
+  soilBearingPsf?: number
+  frostDepthIn?: number
+}): ColumnSizingResult {
+  const entry = resolveColumnCatalogEntry(params)
+  const allowableAxialLbs = Math.max(1, calcColumnCapacityLbs(entry, params.unbracedHeightFt))
+  const utilization = Number((params.axialLoadLbs / allowableAxialLbs).toFixed(3))
+  const soil = Math.max(500, params.soilBearingPsf ?? 1500)
+  // Include ~8% footing & column self-weight allowance in spread footing area
+  const reqAreaSqFt = Math.max(4, (params.axialLoadLbs * 1.08) / soil)
+  const sideIn = Math.max(24, Math.ceil((Math.sqrt(reqAreaSqFt) * 12) / 6) * 6)
+  const footingDepthIn = Math.max(10, Math.ceil(sideIn / 3), (params.frostDepthIn ?? 36) > 0 ? 12 : 10)
+  const barCount = Math.max(3, Math.ceil(sideIn / 8))
+  const footingRebar = `(${barCount}) #4 EW @ bottom (3" clear cover)`
+
+  return {
+    entry,
+    unbracedHeightFt: params.unbracedHeightFt,
+    axialLoadLbs: Math.round(params.axialLoadLbs),
+    allowableAxialLbs,
+    utilization,
+    passes: utilization <= 1.0,
+    footingWidthIn: sideIn,
+    footingDepthIn,
+    footingRebar,
+    recommendedBaseSku: entry.recommendedBaseSku,
+    recommendedCapSku: entry.recommendedCapSku,
+    codeRef: 'AWC NDS 3.7 / AISC E3 / IRC R403.1',
+  }
+}
+
 export function sizeColumnAndFooting(params: {
   axialLoadLbs: number
   unbracedHeightFt: number
@@ -534,24 +737,6 @@ export function sizeColumnAndFooting(params: {
     frostDepthIn = 36,
   } = params
 
-  const calcCapacity = (col: ColumnCatalogEntry): number => {
-    if (col.columnType === 'steel-hss' || col.columnType === 'steel-lally') {
-      const slendernessScale = Math.min(1, Math.pow(9 / Math.max(6, unbracedHeightFt), 0.7))
-      return Math.round(col.allowableAxial9FtLbs * slendernessScale)
-    }
-    // NDS Euler buckling approximation (Cp factor)
-    const dMin = Math.min(col.widthIn, col.depthIn)
-    const leOverD = (unbracedHeightFt * 12) / dMin
-    if (leOverD > 50) return 0
-    const fcStar = col.fcPsi
-    const fcE = (0.822 * col.eMinPsi) / (leOverD * leOverD)
-    const ratio = fcE / fcStar
-    const c = col.columnType === 'psl' || col.columnType === 'glulam' ? 0.9 : 0.8
-    const term = (1 + ratio) / (2 * c)
-    const cp = term - Math.sqrt(Math.max(0, term * term - ratio / c))
-    return Math.round(fcStar * cp * col.areaIn2)
-  }
-
   let pool = [...COLUMN_CATALOG]
   if (preferredType) {
     const f = pool.filter((c) => c.columnType === preferredType)
@@ -559,37 +744,23 @@ export function sizeColumnAndFooting(params: {
   }
   pool.sort((a, b) => a.costPerLfUsd - b.costPerLfUsd)
 
-  let chosen = pool.find((c) => calcCapacity(c) >= axialLoadLbs)
+  let chosen = pool.find((c) => calcColumnCapacityLbs(c, unbracedHeightFt) >= axialLoadLbs)
   if (!chosen && preferredType) {
     chosen = [...COLUMN_CATALOG]
       .sort((a, b) => a.costPerLfUsd - b.costPerLfUsd)
-      .find((c) => calcCapacity(c) >= axialLoadLbs)
+      .find((c) => calcColumnCapacityLbs(c, unbracedHeightFt) >= axialLoadLbs)
   }
   const entry = chosen ?? COLUMN_CATALOG[COLUMN_CATALOG.length - 1]!
-  const allowableAxialLbs = Math.max(1, calcCapacity(entry))
-  const utilization = Number((axialLoadLbs / allowableAxialLbs).toFixed(3))
-
-  // Spread/pad footing area = P / soilBearingPsf (min 24"x24"x10" per IRC R403.1)
-  const reqAreaSqFt = Math.max(4, axialLoadLbs / Math.max(1000, soilBearingPsf))
-  const sideIn = Math.max(24, Math.ceil((Math.sqrt(reqAreaSqFt) * 12) / 6) * 6)
-  const footingDepthIn = Math.max(10, Math.ceil(sideIn / 3), frostDepthIn > 0 ? 12 : 10)
-  const barCount = Math.max(3, Math.ceil(sideIn / 8))
-  const footingRebar = `(${barCount}) #4 EW @ bottom (3" clear cover)`
-
-  return {
-    entry,
+  return checkColumnEntry({
+    designation: entry.designation,
+    columnType: entry.columnType,
+    widthIn: entry.widthIn,
+    depthIn: entry.depthIn,
+    axialLoadLbs,
     unbracedHeightFt,
-    axialLoadLbs: Math.round(axialLoadLbs),
-    allowableAxialLbs,
-    utilization,
-    passes: utilization <= 1.0,
-    footingWidthIn: sideIn,
-    footingDepthIn,
-    footingRebar,
-    recommendedBaseSku: entry.recommendedBaseSku,
-    recommendedCapSku: entry.recommendedCapSku,
-    codeRef: 'AWC NDS 3.7 / IRC R403.1 / R407.3',
-  }
+    soilBearingPsf,
+    frostDepthIn,
+  })
 }
 
 // ============================================================================

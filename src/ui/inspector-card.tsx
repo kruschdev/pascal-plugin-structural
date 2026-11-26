@@ -10,9 +10,8 @@ import { openEditorView, useScene } from '@pascal-app/editor'
 import { useMemo } from 'react'
 import { auditStructuralScene } from '../irc/audit'
 import { isApprovedFirestopMaterial } from '../irc/fireblocking'
-import { checkBeamEntry, sizeColumnAndFooting } from '../irc/sizing'
+import { checkBeamEntry, checkColumnEntry, resolveBeamCatalogEntry } from '../irc/sizing'
 import {
-  BEAM_CATALOG,
   type BeamMaterialFamily,
   type BeamRole,
   type ColumnType,
@@ -25,20 +24,34 @@ import {
   type Vec2,
   getConnectorBySku,
 } from '../irc/tables'
-import {
-  type StructuralScheduleTab,
-  selectDesignParamsFromUi,
-  useStructuralUi,
-} from './store'
+import { type StructuralScheduleTab, useStructuralUi } from './store'
 import { STRUCTURAL_SCHEDULE_VIEW_ID } from './structural-panel'
 
 export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
   const nodes = useScene((s) => s.nodes) as unknown as Readonly<Record<string, SceneNodeLike>>
-  const ui = useStructuralUi()
-  const designOverride = useMemo(() => selectDesignParamsFromUi(ui), [ui])
+  const codeEdition = useStructuralUi((s) => s.codeEdition)
+  const species = useStructuralUi((s) => s.species)
+  const groundSnowPsf = useStructuralUi((s) => s.groundSnowPsf)
+  const windMph = useStructuralUi((s) => s.windMph)
+  const exposure = useStructuralUi((s) => s.exposure)
+  const seismicCategory = useStructuralUi((s) => s.seismicCategory)
+  const frostDepthIn = useStructuralUi((s) => s.frostDepthIn)
+  const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
+  const setActiveTab = useStructuralUi((s) => s.setActiveTab)
+
   const design = useMemo(
-    () => ({ ...DEFAULT_DESIGN_PARAMS, ...designOverride }),
-    [designOverride],
+    () => ({
+      ...DEFAULT_DESIGN_PARAMS,
+      codeEdition,
+      species,
+      groundSnowPsf,
+      windMph,
+      exposure,
+      seismicCategory,
+      frostDepthIn,
+      soilBearingPsf,
+    }),
+    [codeEdition, species, groundSnowPsf, windMph, exposure, seismicCategory, frostDepthIn, soilBearingPsf],
   )
   const audit = useMemo(() => auditStructuralScene(nodes, design), [nodes, design])
 
@@ -54,7 +67,7 @@ export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
   const hasWarning = nodeFindings.length > 0 && !hasError
 
   const openTab = (tab: StructuralScheduleTab) => {
-    ui.setActiveTab(tab)
+    setActiveTab(tab)
     openEditorView(STRUCTURAL_SCHEDULE_VIEW_ID, { beside: true })
   }
 
@@ -112,16 +125,13 @@ export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
         const role = (raw.role as BeamRole | undefined) ?? 'header'
         const tribFt = typeof raw.tributaryWidthFt === 'number' ? raw.tributaryWidthFt : 10
 
-        const entry =
-          BEAM_CATALOG.find(
-            (c) =>
-              c.family === family &&
-              Math.abs(c.widthIn - widthIn) < 0.35 &&
-              Math.abs(c.depthIn - depthIn) < 0.75,
-          ) ??
-          BEAM_CATALOG.find((c) => c.designation === raw.designation) ??
-          BEAM_CATALOG.find((c) => c.family === family) ??
-          BEAM_CATALOG[0]!
+        const entry = resolveBeamCatalogEntry({
+          designation: typeof raw.designation === 'string' ? raw.designation : undefined,
+          family,
+          widthIn,
+          depthIn,
+          plyCount: typeof raw.plyCount === 'number' ? raw.plyCount : undefined,
+        })
 
         const check = checkBeamEntry(entry, {
           spanFt,
@@ -169,34 +179,39 @@ export default function StructuralInspectorCard({ node }: { node?: AnyNode }) {
       {raw.type === 'structural:column' && (() => {
         const axialLoadLbs = typeof raw.axialLoadLbs === 'number' ? raw.axialLoadLbs : 4500
         const heightFt = (typeof raw.heightM === 'number' ? raw.heightM : 2.74) * METERS_TO_FEET
-        const sizing = sizeColumnAndFooting({
+        const check = checkColumnEntry({
+          designation: typeof raw.designation === 'string' ? raw.designation : undefined,
+          columnType: raw.columnType as ColumnType | undefined,
+          widthIn: typeof raw.widthIn === 'number' ? raw.widthIn : undefined,
+          depthIn: typeof raw.depthIn === 'number' ? raw.depthIn : undefined,
           axialLoadLbs,
           unbracedHeightFt: heightFt,
-          preferredType: raw.columnType as ColumnType | undefined,
           soilBearingPsf: design.soilBearingPsf,
           frostDepthIn: design.frostDepthIn,
         })
-        const fw = typeof raw.footingWidthIn === 'number' ? raw.footingWidthIn : sizing.footingWidthIn
-        const fd = typeof raw.footingDepthIn === 'number' ? raw.footingDepthIn : sizing.footingDepthIn
-        const rebar = String(raw.footingRebar ?? sizing.footingRebar)
+        const hasFootingW = typeof raw.footingWidthIn === 'number' && raw.footingWidthIn > 0
+        const hasFootingD = typeof raw.footingDepthIn === 'number' && raw.footingDepthIn > 0
+        const fw = hasFootingW ? (raw.footingWidthIn as number) : 0
+        const fd = hasFootingD ? (raw.footingDepthIn as number) : 0
+        const rebar = String(raw.footingRebar ?? check.footingRebar)
 
         return (
           <>
-            <Row label="Designation" value={String(raw.designation ?? sizing.entry.designation)} />
-            <Row label="Height / Type" value={`${heightFt.toFixed(1)} ft · ${String(raw.columnType ?? sizing.entry.columnType)}`} />
+            <Row label="Designation" value={String(raw.designation ?? check.entry.designation)} />
+            <Row label="Height / Type" value={`${heightFt.toFixed(1)} ft · ${String(raw.columnType ?? check.entry.columnType)}`} />
             <Row
               label="Axial Load / Capacity"
-              value={`${axialLoadLbs.toLocaleString()} / ${sizing.allowableAxialLbs.toLocaleString()} lbs (${Math.round(sizing.utilization * 100)}%)`}
-              warn={!sizing.passes}
+              value={`${axialLoadLbs.toLocaleString()} / ${check.allowableAxialLbs.toLocaleString()} lbs (${Math.round(check.utilization * 100)}%)`}
+              warn={!check.passes}
             />
             <Row
               label="Pad Footing"
-              value={`${fw}"×${fw}"×${fd}"`}
-              warn={fw < sizing.footingWidthIn - 1}
+              value={hasFootingW && hasFootingD ? `${fw}"×${fw}"×${fd}" (min ${check.footingWidthIn}"×${check.footingDepthIn}")` : `Missing (req ${check.footingWidthIn}"×${check.footingWidthIn}"×${check.footingDepthIn}")`}
+              warn={!hasFootingW || !hasFootingD || fw < check.footingWidthIn - 1 || fd < check.footingDepthIn}
             />
             <Row label="Footing Rebar" value={rebar} />
             <Row label="Squash Blocks" value={raw.hasSquashBlocks ? 'Installed (TJI)' : 'None'} />
-            <Row label="Base / Cap SKUs" value={`${sizing.recommendedBaseSku} / ${sizing.recommendedCapSku}`} />
+            <Row label="Base / Cap SKUs" value={`${check.recommendedBaseSku} / ${check.recommendedCapSku}`} />
             <button type="button" onClick={() => openTab('columns')} style={linkBtnStyle}>
               Open Column &amp; Footing Schedule
             </button>

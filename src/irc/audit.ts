@@ -5,13 +5,13 @@
 
 import { deriveRequiredFirestops, isApprovedFirestopMaterial } from './fireblocking'
 import { traceStructuralLoadPaths } from './load-path'
-import { checkBeamEntry, sizeColumnAndFooting } from './sizing'
+import { checkBeamEntry, checkColumnEntry, resolveBeamCatalogEntry } from './sizing'
 import {
-  BEAM_CATALOG,
   type BeamMaterialFamily,
   type BeamRole,
   type ColumnType,
   DEFAULT_DESIGN_PARAMS,
+  FIRESTOP_RULES,
   type FirestopKind,
   type FirestopMaterial,
   INCHES_TO_METERS,
@@ -50,7 +50,12 @@ export type StructuralAuditReport = {
   findings: StructuralAuditFinding[]
 }
 
-function segmentIntersectsBeam(
+/**
+ * True 3D segment vs. Oriented Bounding Box (OBB) intersection for angled/diagonal beams.
+ * Transforms segment `a -> b` into beam-local `(u along beam, y vertical, n transverse)` space
+ * and applies the exact Kay-Kajiya slab clipping test (eliminating diagonal AABB false positives).
+ */
+export function segmentIntersectsBeam(
   a: Vec3,
   b: Vec3,
   beamStart: Vec2,
@@ -58,24 +63,47 @@ function segmentIntersectsBeam(
   beamY: number,
   beamWidthM: number,
   beamDepthM: number,
+  mepRadiusM = 0.025,
 ): boolean {
-  const minBy = beamY - beamDepthM / 2 - 0.02
-  const maxBy = beamY + beamDepthM / 2 + 0.02
-  const segMinY = Math.min(a[1], b[1])
-  const segMaxY = Math.max(a[1], b[1])
-  if (segMaxY < minBy || segMinY > maxBy) return false
+  const bdx = beamEnd[0] - beamStart[0]
+  const bdz = beamEnd[1] - beamStart[1]
+  const beamLen = Math.hypot(bdx, bdz)
+  if (beamLen < 1e-4) return false
+  const ux = bdx / beamLen
+  const uz = bdz / beamLen
+  const nx = -uz
+  const nz = ux
 
-  const bMinX = Math.min(beamStart[0], beamEnd[0]) - beamWidthM / 2
-  const bMaxX = Math.max(beamStart[0], beamEnd[0]) + beamWidthM / 2
-  const bMinZ = Math.min(beamStart[1], beamEnd[1]) - beamWidthM / 2
-  const bMaxZ = Math.max(beamStart[1], beamEnd[1]) + beamWidthM / 2
+  const toLocal = (p: Vec3): [number, number, number] => {
+    const rx = p[0] - beamStart[0]
+    const rz = p[2] - beamStart[1]
+    return [rx * ux + rz * uz, p[1] - beamY, rx * nx + rz * nz]
+  }
 
-  const segMinX = Math.min(a[0], b[0])
-  const segMaxX = Math.max(a[0], b[0])
-  const segMinZ = Math.min(a[2], b[2])
-  const segMaxZ = Math.max(a[2], b[2])
+  const la = toLocal(a)
+  const lb = toLocal(b)
+  const minB: [number, number, number] = [-mepRadiusM, -beamDepthM / 2 - mepRadiusM, -beamWidthM / 2 - mepRadiusM]
+  const maxB: [number, number, number] = [beamLen + mepRadiusM, beamDepthM / 2 + mepRadiusM, beamWidthM / 2 + mepRadiusM]
 
-  return segMaxX >= bMinX && segMinX <= bMaxX && segMaxZ >= bMinZ && segMinZ <= bMaxZ
+  let tMin = 0
+  let tMax = 1
+  for (let axis = 0; axis < 3; axis++) {
+    const o = la[axis]!
+    const d = lb[axis]! - o
+    const lo = minB[axis]!
+    const hi = maxB[axis]!
+    if (Math.abs(d) < 1e-9) {
+      if (o < lo || o > hi) return false
+    } else {
+      let t1 = (lo - o) / d
+      let t2 = (hi - o) / d
+      if (t1 > t2) [t1, t2] = [t2, t1]
+      tMin = Math.max(tMin, t1)
+      tMax = Math.min(tMax, t2)
+      if (tMin > tMax) return false
+    }
+  }
+  return tMax >= 0 && tMin <= 1
 }
 
 export function auditStructuralScene(
@@ -120,16 +148,13 @@ export function auditStructuralScene(
     const role = (beam.role as BeamRole | undefined) ?? 'header'
     const tribFt = typeof beam.tributaryWidthFt === 'number' ? beam.tributaryWidthFt : 10
 
-    const entry =
-      BEAM_CATALOG.find(
-        (c) =>
-          c.family === family &&
-          Math.abs(c.widthIn - widthIn) < 0.35 &&
-          Math.abs(c.depthIn - depthIn) < 0.75,
-      ) ??
-      BEAM_CATALOG.find((c) => c.designation === beam.designation) ??
-      BEAM_CATALOG.find((c) => c.family === family) ??
-      BEAM_CATALOG[0]!
+    const entry = resolveBeamCatalogEntry({
+      designation: typeof beam.designation === 'string' ? beam.designation : undefined,
+      family,
+      widthIn,
+      depthIn,
+      plyCount: typeof beam.plyCount === 'number' ? beam.plyCount : undefined,
+    })
 
     const check = checkBeamEntry(entry, {
       spanFt,
@@ -178,28 +203,61 @@ export function auditStructuralScene(
     }
   }
 
-  // 2. Audit columns & footings
+  // 2. Audit actual placed column buckling capacity & spread footings
   for (const col of columns) {
     const axial = typeof col.axialLoadLbs === 'number' ? col.axialLoadLbs : 4500
     const heightFt = (typeof col.heightM === 'number' ? col.heightM : 2.74) * METERS_TO_FEET
-    const colCheck = sizeColumnAndFooting({
+    const colCheck = checkColumnEntry({
+      designation: typeof col.designation === 'string' ? col.designation : undefined,
+      columnType: col.columnType as ColumnType | undefined,
+      widthIn: typeof col.widthIn === 'number' ? col.widthIn : undefined,
+      depthIn: typeof col.depthIn === 'number' ? col.depthIn : undefined,
       axialLoadLbs: axial,
       unbracedHeightFt: heightFt,
-      preferredType: col.columnType as ColumnType | undefined,
       soilBearingPsf: design.soilBearingPsf,
       frostDepthIn: design.frostDepthIn,
     })
 
-    const actualFootingW = typeof col.footingWidthIn === 'number' ? col.footingWidthIn : 0
-    if (actualFootingW > 0 && actualFootingW < colCheck.footingWidthIn - 1) {
+    if (!colCheck.passes) {
       push({
         severity: 'error',
         category: 'column-footing',
-        codeRef: 'IRC R403.1',
+        codeRef: colCheck.codeRef,
         nodeId: col.id,
-        message: `Column "${col.name ?? col.id}" pad footing (${actualFootingW}" sq) is undersized for ${axial} lbs on ${design.soilBearingPsf} psf soil (needs ${colCheck.footingWidthIn}"x${colCheck.footingWidthIn}"x${colCheck.footingDepthIn}").`,
-        remediation: `Enlarge footing to ${colCheck.footingWidthIn}"x${colCheck.footingWidthIn}"x${colCheck.footingDepthIn}" with ${colCheck.footingRebar}.`,
+        message: `Column "${col.name ?? col.id}" (${colCheck.entry.designation}, ${heightFt.toFixed(1)} ft) is overstressed under ${axial} lbs (allowable ${colCheck.allowableAxialLbs} lbs, ${Math.round(colCheck.utilization * 100)}%).`,
+        remediation: 'Upsize column section (e.g., 6x6 DF-L, 5-1/4" PSL, or Steel HSS 4x4x1/4).',
       })
+    }
+
+    const targetId = typeof col.transfersToNodeId === 'string' ? col.transfersToNodeId : ''
+    const stacksToLowerCol = Boolean(
+      targetId &&
+        targetId !== col.id &&
+        !targetId.startsWith('footing:') &&
+        nodes[targetId]?.type === 'structural:column',
+    )
+    const actualFootingW = typeof col.footingWidthIn === 'number' ? col.footingWidthIn : 0
+    const actualFootingD = typeof col.footingDepthIn === 'number' ? col.footingDepthIn : 0
+    if (!stacksToLowerCol) {
+      if (actualFootingW <= 0) {
+        push({
+          severity: 'error',
+          category: 'column-footing',
+          codeRef: 'IRC R403.1',
+          nodeId: col.id,
+          message: `Column "${col.name ?? col.id}" has no spread/pad footing and does not stack onto a verified lower column.`,
+          remediation: `Provide a ${colCheck.footingWidthIn}"x${colCheck.footingWidthIn}"x${colCheck.footingDepthIn}" spread footing with ${colCheck.footingRebar}.`,
+        })
+      } else if (actualFootingW < colCheck.footingWidthIn - 1 || actualFootingD < colCheck.footingDepthIn - 1) {
+        push({
+          severity: 'error',
+          category: 'column-footing',
+          codeRef: 'IRC R403.1',
+          nodeId: col.id,
+          message: `Column "${col.name ?? col.id}" pad footing (${actualFootingW}" sq x ${actualFootingD || 0}" deep) is undersized for ${axial} lbs on ${design.soilBearingPsf} psf soil (needs ${colCheck.footingWidthIn}"x${colCheck.footingWidthIn}"x${colCheck.footingDepthIn}").`,
+          remediation: `Enlarge footing to ${colCheck.footingWidthIn}"x${colCheck.footingWidthIn}"x${colCheck.footingDepthIn}" with ${colCheck.footingRebar}.`,
+        })
+      }
     }
   }
 
@@ -220,26 +278,54 @@ export function auditStructuralScene(
   }
 
   // 4. Audit Fire Blocking & Draftstopping completeness + approved materials (IRC R302.11 / R302.12)
+  const validFirestops: SceneNodeLike[] = []
   for (const fs of firestops) {
     const kind = fs.firestopKind as FirestopKind | undefined
     const mat = fs.material as FirestopMaterial | undefined
-    if (kind && mat && !isApprovedFirestopMaterial(kind, mat)) {
+    if (!kind || !(kind in FIRESTOP_RULES)) {
+      push({
+        severity: 'error',
+        category: 'fire-blocking',
+        codeRef: 'IRC R302.11',
+        nodeId: fs.id,
+        message: `Firestop "${fs.name ?? fs.id}" has missing or unrecognized firestopKind "${String(kind ?? '')}".`,
+        remediation: 'Assign a valid IRC R302.11 / R302.12 firestopKind.',
+      })
+      continue
+    }
+    if (!mat || !isApprovedFirestopMaterial(kind, mat)) {
       push({
         severity: 'error',
         category: 'fire-blocking',
         codeRef: 'IRC R302.11.1',
         nodeId: fs.id,
-        message: `Firestop "${fs.name ?? fs.id}" uses unapproved material "${mat}" for ${kind}.`,
+        message: `Firestop "${fs.name ?? fs.id}" uses missing or unapproved material "${String(mat ?? 'none')}" for ${kind}.`,
         remediation: 'Switch to a code-approved IRC R302.11.1 material (2x lumber, 23/32" OSB, 1/2" gypsum, mineral wool, or listed intumescent collar).',
       })
+      continue
     }
+    validFirestops.push(fs)
   }
 
   const floorSys = (assemblies[0]?.floorSystem as 'dimensional' | 'tji-ijoist' | 'open-web-truss' | undefined) ?? 'dimensional'
   const requiredFs = deriveRequiredFirestops({ nodes, levelId: null, floorSystem: floorSys })
-  const presentKinds = new Set(firestops.map((f) => String(f.firestopKind)))
+  const midOf = (s?: Vec2, e?: Vec2): Vec2 => [
+    ((s?.[0] ?? 0) + (e?.[0] ?? 0)) / 2,
+    ((s?.[1] ?? 0) + (e?.[1] ?? 0)) / 2,
+  ]
   for (const req of requiredFs) {
-    if (!presentKinds.has(req.firestopKind)) {
+    const reqMid = midOf(req.start, req.end)
+    const matched = validFirestops.some((fs) => {
+      if (fs.firestopKind !== req.firestopKind) return false
+      const elevDiff = Math.abs((typeof fs.elevationY === 'number' ? fs.elevationY : req.elevationY) - req.elevationY)
+      if (elevDiff > 0.75) return false
+      if (req.hostWallId && fs.hostWallId) return fs.hostWallId === req.hostWallId
+      if (req.penetratingNodeId && fs.penetratingNodeId) return fs.penetratingNodeId === req.penetratingNodeId
+      const fsMid = midOf(fs.start as Vec2 | undefined, fs.end as Vec2 | undefined)
+      const distPlan = Math.hypot(fsMid[0] - reqMid[0], fsMid[1] - reqMid[1])
+      return distPlan <= 1.25
+    })
+    if (!matched) {
       push({
         severity: 'error',
         category: 'fire-blocking',
@@ -279,7 +365,7 @@ export function auditStructuralScene(
   for (const bwl of lp.bracedWallLines) {
     if (!bwl.passes) {
       push({
-        severity: 'warning',
+        severity: 'error',
         category: 'bracing-shear',
         codeRef: bwl.codeRef,
         message: `Braced Wall Line ${bwl.id} (${bwl.axis}-axis): ${bwl.note}`,
@@ -288,19 +374,23 @@ export function auditStructuralScene(
     }
   }
 
-  // 6. Priority #1 Structural Right-of-Way: detect MEP runs boring through structural beams!
+  // 6. Priority #1 Structural Right-of-Way: detect MEP runs boring through structural beams (deduped per run/beam, checking all beams)!
+  const reportedClashes = new Set<string>()
   for (const run of mepRuns) {
     const path = run.path as ReadonlyArray<Vec3>
     for (let i = 1; i < path.length; i++) {
       const a = path[i - 1]!
       const b = path[i]!
       for (const beam of beams) {
+        const clashKey = `${run.id}::${beam.id}`
+        if (reportedClashes.has(clashKey)) continue
         const start = (beam.start as Vec2 | undefined) ?? [0, 0]
         const end = (beam.end as Vec2 | undefined) ?? [1, 0]
         const beamY = typeof beam.elevationY === 'number' ? beam.elevationY : 2.4
         const wM = (typeof beam.widthIn === 'number' ? beam.widthIn : 3.5) * INCHES_TO_METERS
         const dM = (typeof beam.depthIn === 'number' ? beam.depthIn : 11.875) * INCHES_TO_METERS
         if (segmentIntersectsBeam(a, b, start, end, beamY, wM, dM)) {
+          reportedClashes.add(clashKey)
           push({
             severity: 'error',
             category: 'mep-clash',
@@ -309,7 +399,6 @@ export function auditStructuralScene(
             message: `MEP run "${run.id}" (${run.type}) penetrates structural beam "${beam.name ?? beam.id}" (${beam.designation ?? beam.beamType}) — boring engineered beams/headers is prohibited.`,
             remediation: `Re-route ${run.type} below the beam soffit or through an adjacent open joist/TJI knockout bay.`,
           })
-          break
         }
       }
     }

@@ -10,6 +10,7 @@ import {
   type SceneNodeLike,
   type StructuralDesignParams,
   type Vec2,
+  belongsToLevel,
   getRequiredBracedWallPercent,
 } from './tables'
 
@@ -57,15 +58,19 @@ function getWallLengthM(w: SceneNodeLike): number {
 }
 
 /**
- * Evaluate IRC R602.10 Braced Wall Lines along both X and Z axes.
- * Clusters exterior/perimeter walls within 4 ft (1.22 m) perpendicular tolerance (R602.10.1.1).
+ * Evaluate IRC R602.10 Braced Wall Lines along both X and Z axes, scoped by level.
+ * Clusters walls within 4 ft (1.2192 m) perpendicular tolerance (R602.10.1.1) and measures
+ * genuine continuous solid panel spans (WSP >= 48", CS-PF >= 16") rather than pooling slivers.
  */
 export function evaluateBracedWallLines(params: {
   nodes: Readonly<Record<string, SceneNodeLike>>
   design?: Partial<StructuralDesignParams>
+  levelId?: string | null
 }): BracedWallLineReport[] {
   const design = { ...DEFAULT_DESIGN_PARAMS, ...params.design }
-  const all = Object.values(params.nodes)
+  const all = Object.values(params.nodes).filter((n) =>
+    params.levelId ? belongsToLevel(params.nodes, n, params.levelId) : true,
+  )
   const walls = all.filter((n) => n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end))
   const doorsWindows = all.filter((n) => n.type === 'door' || n.type === 'window')
   const requiredPercent = getRequiredBracedWallPercent({
@@ -80,10 +85,14 @@ export function evaluateBracedWallLines(params: {
 
   type WallEntry = {
     wall: SceneNodeLike
+    levelKey: string
     axis: 'X' | 'Z'
     offsetM: number
+    projMinM: number
+    projMaxM: number
     lenM: number
-    bracedLenM: number
+    wspBracedLenM: number
+    portalPanelLensM: number[]
   }
 
   const entries: WallEntry[] = []
@@ -97,96 +106,157 @@ export function evaluateBracedWallLines(params: {
 
     const axis: 'X' | 'Z' = dx >= dz ? 'X' : 'Z'
     const offsetM = axis === 'X' ? (start[1] + end[1]) / 2 : (start[0] + end[0]) / 2
+    const projMinM = axis === 'X' ? Math.min(start[0], end[0]) : Math.min(start[1], end[1])
+    const projMaxM = axis === 'X' ? Math.max(start[0], end[0]) : Math.max(start[1], end[1])
 
-    // Sum child opening widths to estimate solid braced segments >= 4 ft (1.219 m) or portal >= 16" (0.406 m)
+    // Split wall into real continuous solid pier intervals around child doors/windows
     const childOpenings = doorsWindows.filter((o) => o.parentId === w.id)
-    const openingWidthM = childOpenings.reduce(
-      (sum, o) => sum + (typeof o.width === 'number' ? o.width : 0.91),
-      0,
-    )
-    const solidM = Math.max(0, lenM - openingWidthM)
-    // Count solid segments qualifying for WSP (>= 4 ft) or CS-PF portal (>= 16")
-    const bracedLenM = solidM >= 1.219 ? solidM : solidM >= 0.406 ? solidM : 0
-    entries.push({ wall: w, axis, offsetM, lenM, bracedLenM })
+    const cuts: Array<[number, number]> = []
+    for (const o of childOpenings) {
+      const ow = typeof o.width === 'number' && o.width > 0 ? o.width : 0.91
+      let uCenter = lenM / 2
+      if (Array.isArray(o.position) && typeof o.position[0] === 'number') {
+        const px = o.position[0]
+        const pz = typeof o.position[2] === 'number' ? o.position[2] : 0
+        if (Math.abs(pz) < 0.4 && px >= -0.2 && px <= lenM + 0.2) {
+          uCenter = px
+        } else {
+          const ux = (end[0] - start[0]) / lenM
+          const uz = (end[1] - start[1]) / lenM
+          uCenter = (px - start[0]) * ux + (pz - start[1]) * uz
+        }
+      }
+      cuts.push([Math.max(0, uCenter - ow / 2), Math.min(lenM, uCenter + ow / 2)])
+    }
+    cuts.sort((a, b) => a[0] - b[0])
+    const solidSpans: number[] = []
+    let cursor = 0
+    for (const [c0, c1] of cuts) {
+      if (c0 > cursor) solidSpans.push(c0 - cursor)
+      cursor = Math.max(cursor, c1)
+    }
+    if (cursor < lenM) solidSpans.push(lenM - cursor)
+
+    const wallHeightM = typeof w.height === 'number' && w.height > 0 ? w.height : 2.7432
+    const wspBracedLenM = solidSpans.reduce((s, seg) => s + (seg >= 1.2192 ? seg : 0), 0)
+    // IRC Table R602.10.5 / R602.10.6.4: CS-PF portal frames apply only adjacent to openings on walls <= 10 ft (3.05 m)
+    const portalPanelLensM =
+      childOpenings.length > 0 && wallHeightM <= 3.06 && design.storiesAbove <= 1
+        ? solidSpans.filter((seg) => seg >= 0.4064 && seg < 1.2192)
+        : []
+    entries.push({
+      wall: w,
+      levelKey: w.parentId ?? 'default',
+      axis,
+      offsetM,
+      projMinM,
+      projMaxM,
+      lenM,
+      wspBracedLenM,
+      portalPanelLensM,
+    })
   }
 
   const reports: BracedWallLineReport[] = []
-  const TOL_M = 1.22 // 4 ft per IRC R602.10.1.1
+  const TOL_M = 1.2192 // exact 4 ft per IRC R602.10.1.1
+  const levelKeys = [...new Set(entries.map((e) => e.levelKey))]
 
-  for (const axis of ['X', 'Z'] as const) {
-    const axisEntries = entries
-      .filter((e) => e.axis === axis)
-      .sort((a, b) => a.offsetM - b.offsetM)
-    const clusters: WallEntry[][] = []
-    for (const e of axisEntries) {
-      const last = clusters[clusters.length - 1]
-      if (!last || Math.abs(e.offsetM - last[0]!.offsetM) > TOL_M) {
-        clusters.push([e])
-      } else {
-        last.push(e)
-      }
-    }
-
-    clusters.forEach((cluster, idx) => {
-      const totalM = cluster.reduce((s, e) => s + e.lenM, 0)
-      const bracedM = cluster.reduce((s, e) => s + e.bracedLenM, 0)
-      const totalFt = totalM * METERS_TO_FEET
-      const bracedFt = bracedM * METERS_TO_FEET
-      const providedPercent = totalFt > 0 ? Math.round((bracedFt / totalFt) * 100) : 0
-      const passes = providedPercent >= requiredPercent
-      const highLateral = design.windMph >= 130 || requiresPlateWashers
-
-      let bracingMethod: BracedWallLineReport['bracingMethod'] = 'WSP'
-      if (!passes || (highLateral && providedPercent < requiredPercent + 10)) {
-        bracingMethod = bracedFt < 4 ? 'CS-PF' : 'Engineered-Shear'
-      } else if (highLateral) {
-        bracingMethod = 'CS-WSP'
+  for (const levelKey of levelKeys) {
+    for (const axis of ['X', 'Z'] as const) {
+      const axisEntries = entries
+        .filter((e) => e.levelKey === levelKey && e.axis === axis)
+        .sort((a, b) => a.offsetM - b.offsetM)
+      const clusters: WallEntry[][] = []
+      for (const e of axisEntries) {
+        const last = clusters[clusters.length - 1]
+        if (!last || Math.abs(e.offsetM - last[0]!.offsetM) > TOL_M) {
+          clusters.push([e])
+        } else {
+          last.push(e)
+        }
       }
 
-      const overturningUpliftLbs =
-        bracingMethod === 'Engineered-Shear'
-          ? (design.storiesAbove >= 1 ? 7200 : 4800)
-          : bracingMethod === 'CS-PF'
-            ? 3500
+      clusters.forEach((cluster, idx) => {
+        // IRC R602.10.1.2: BWL length is out-to-out distance between extreme ends along the axis
+        const minProj = cluster.reduce((m, e) => Math.min(m, e.projMinM), Number.POSITIVE_INFINITY)
+        const maxProj = cluster.reduce((m, e) => Math.max(m, e.projMaxM), Number.NEGATIVE_INFINITY)
+        const maxWallM = cluster.reduce((m, e) => Math.max(m, e.lenM), 0)
+        const totalM = Math.max(maxWallM, maxProj - minProj)
+        const wspM = cluster.reduce((s, e) => s + e.wspBracedLenM, 0)
+        // IRC Table R602.10.5 limits CS-PF portal frames to at most 4 panels per braced wall line
+        const allPortalPanels = cluster
+          .flatMap((e) => e.portalPanelLensM)
+          .sort((a, b) => b - a)
+          .slice(0, 4)
+        const portalExtraM = allPortalPanels.reduce((s, p) => s + p, 0)
+        const totalFt = totalM * METERS_TO_FEET
+        const wspFt = wspM * METERS_TO_FEET
+        const portalFt = (wspM + portalExtraM) * METERS_TO_FEET
+        const wspPercent = totalFt > 0 ? Math.round((wspFt / totalFt) * 100) : 0
+        const highLateral = design.windMph >= 130 || requiresPlateWashers
+
+        // Credit WSP piers (>=48") by default; only credit up to 4 CS-PF (16"-48") portal frames when adjacent to openings
+        const usesPortal = wspPercent < requiredPercent && portalExtraM > 0
+        const bracedFt = usesPortal ? portalFt : wspFt
+        const providedPercent = totalFt > 0 ? Math.round((bracedFt / totalFt) * 100) : 0
+        const passes = providedPercent >= requiredPercent
+
+        let bracingMethod: BracedWallLineReport['bracingMethod'] = 'WSP'
+        if (usesPortal) {
+          bracingMethod = 'CS-PF'
+        } else if (!passes || (highLateral && providedPercent < requiredPercent + 10)) {
+          bracingMethod = 'Engineered-Shear'
+        } else if (highLateral) {
+          bracingMethod = 'CS-WSP'
+        }
+
+        const overturningUpliftLbs =
+          bracingMethod === 'Engineered-Shear'
+            ? design.storiesAbove >= 1
+              ? 7200
+              : 4800
+            : bracingMethod === 'CS-PF'
+              ? 3500
+              : highLateral
+                ? 3000
+                : 0
+
+        const hd = overturningUpliftLbs > 0 ? selectHoldDownSku(overturningUpliftLbs) : null
+        const edgeNailSpacingIn: 2 | 3 | 4 | 6 =
+          bracingMethod === 'Engineered-Shear'
+            ? design.storiesAbove >= 1
+              ? 2
+              : 3
             : highLateral
-              ? 3000
-              : 0
+              ? 4
+              : 6
 
-      const hd = overturningUpliftLbs > 0 ? selectHoldDownSku(overturningUpliftLbs) : null
-      const edgeNailSpacingIn: 2 | 3 | 4 | 6 =
-        bracingMethod === 'Engineered-Shear'
-          ? design.storiesAbove >= 1
-            ? 2
-            : 3
-          : highLateral
-            ? 4
-            : 6
-
-      reports.push({
-        id: `BWL-${axis}${idx + 1}`,
-        axis,
-        offsetM: Number(cluster[0]!.offsetM.toFixed(2)),
-        wallIds: cluster.map((e) => e.wall.id),
-        totalLineLengthFt: Number(totalFt.toFixed(1)),
-        bracedPanelLengthFt: Number(bracedFt.toFixed(1)),
-        providedPercent,
-        requiredPercent,
-        passes,
-        bracingMethod,
-        requiredHoldDownSku: hd?.sku ?? null,
-        requiresPlateWashers,
-        edgeNailSpacingIn,
-        codeRef:
-          bracingMethod === 'CS-PF'
-            ? 'IRC R602.10.6.4'
-            : bracingMethod === 'Engineered-Shear'
-              ? 'AWC SDPWS / IRC R602.10'
-              : 'IRC Table R602.10.3(1)/(3)',
-        note: passes
-          ? undefined
-          : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}% — add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
+        reports.push({
+          id: levelKeys.length > 1 ? `BWL-${levelKey}-${axis}${idx + 1}` : `BWL-${axis}${idx + 1}`,
+          axis,
+          offsetM: Number(cluster[0]!.offsetM.toFixed(2)),
+          wallIds: cluster.map((e) => e.wall.id),
+          totalLineLengthFt: Number(totalFt.toFixed(1)),
+          bracedPanelLengthFt: Number(bracedFt.toFixed(1)),
+          providedPercent,
+          requiredPercent,
+          passes,
+          bracingMethod,
+          requiredHoldDownSku: hd?.sku ?? null,
+          requiresPlateWashers,
+          edgeNailSpacingIn,
+          codeRef:
+            bracingMethod === 'CS-PF'
+              ? 'IRC R602.10.6.4'
+              : bracingMethod === 'Engineered-Shear'
+                ? 'AWC SDPWS / IRC R602.10'
+                : 'IRC Table R602.10.3(1)/(3)',
+          note: passes
+            ? undefined
+            : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}% — add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
+        })
       })
-    })
+    }
   }
 
   return reports
@@ -226,11 +296,20 @@ export function traceStructuralLoadPaths(params: {
             ? 3200
             : 1800
 
+    const beamY = typeof beam.elevationY === 'number' ? beam.elevationY : 2.4
+    const beamDepthM = (typeof beam.depthIn === 'number' ? beam.depthIn : 11.875) * 0.0254
+    const beamBottomY = beamY - beamDepthM / 2
+
     for (const [endIdx, pt] of [start, end].entries()) {
-      // Check if a column sits near this beam end
+      // Check if a column sits near this beam end AND reaches up to support the beam underside (same level/vertical alignment)
       const col = columns.find((c) => {
+        if (beam.parentId && c.parentId && c.parentId !== beam.parentId) return false
         const p = c.position ?? [0, 0, 0]
-        return Math.hypot(p[0] - pt[0], p[2] - pt[1]) <= SUPPORT_TOL_M
+        const colH = typeof c.heightM === 'number' ? c.heightM : 2.74
+        const colTopY = p[1] + colH
+        const planMatch = Math.hypot(p[0] - pt[0], p[2] - pt[1]) <= SUPPORT_TOL_M
+        const verticalMatch = p[1] <= beamBottomY + 0.35 && colTopY >= beamBottomY - 0.55
+        return planMatch && verticalMatch
       })
       if (col) {
         gravityLinks.push({
@@ -250,8 +329,9 @@ export function traceStructuralLoadPaths(params: {
         continue
       }
 
-      // Check if beam end bears on a wall (e.g. header in a wall or girder pocketed in perimeter wall)
+      // Check if beam end bears on a wall on the same level
       const wall = walls.find((w) => {
+        if (beam.parentId && w.parentId && w.parentId !== beam.parentId) return false
         const ws = w.start!
         const we = w.end!
         const len = Math.hypot(we[0] - ws[0], we[1] - ws[1])
@@ -290,54 +370,86 @@ export function traceStructuralLoadPaths(params: {
     }
   }
 
-  // 2. Check every column's load transfer down to a lower column or pad footing
+  // 2. Check every column's load transfer down to a verified lower column or pad footing
   for (const col of columns) {
     const pos = col.position ?? [0, 0, 0]
     const load = typeof col.axialLoadLbs === 'number' ? col.axialLoadLbs : 4500
     const hasFooting = typeof col.footingWidthIn === 'number' && col.footingWidthIn >= 18
-    const hasTarget = Boolean(col.transfersToNodeId)
-    const continuous = hasFooting || hasTarget
+    const targetId = typeof col.transfersToNodeId === 'string' ? col.transfersToNodeId : ''
+    const hasVerifiedTarget =
+      targetId.startsWith('footing:')
+        ? hasFooting
+        : Boolean(targetId && params.nodes[targetId])
+    const continuous = hasFooting || hasVerifiedTarget
     gravityLinks.push({
       fromNodeId: col.id,
       fromType: 'column',
-      toNodeId: (col.transfersToNodeId as string | undefined) ?? (hasFooting ? `footing:${col.id}` : null),
-      toType: hasTarget ? 'lower-column' : hasFooting ? 'pad-footing' : 'missing-footing',
+      toNodeId: hasVerifiedTarget ? targetId : hasFooting ? `footing:${col.id}` : null,
+      toType: hasVerifiedTarget && !targetId.startsWith('footing:')
+        ? 'lower-column'
+        : hasFooting
+          ? 'pad-footing'
+          : 'missing-footing',
       position: [pos[0], pos[2]],
       axialLoadLbs: load,
       continuous,
       requiresSquashBlock: hasTji && !col.hasSquashBlocks,
       issue: continuous
         ? undefined
-        : `Column ${col.id} (${load} lbs) lacks a foundation pad footing or stacked lower column (IRC R403.1).`,
+        : targetId && !targetId.startsWith('footing:') && !params.nodes[targetId]
+          ? `Column ${col.id} references missing target "${targetId}" with no spread footing (broken load path, IRC R403.1).`
+          : `Column ${col.id} (${load} lbs) lacks a foundation pad footing or stacked lower column (IRC R403.1).`,
     })
   }
 
-  // 3. Uplift load path verification (roof hurricane ties -> straps -> hold-downs)
+  // 3. Uplift load path verification (per-column base/cap + wind/seismic continuity without assemblies===0 blind spot)
   const upliftFindings: string[] = []
+  const hasStructure = assemblies.length > 0 || beams.length > 0 || columns.length > 0 || walls.length > 0
   const hasRoofTies = connectors.some((c) => c.category === 'hurricane-tie')
   const hasStraps = connectors.some((c) => c.category === 'tension-strap' || c.category === 'framing-angle')
   const hasHoldDowns = connectors.some((c) => c.category === 'hold-down')
-  const hasPostBases = connectors.some((c) => c.category === 'post-base')
-  const hasPostCaps = connectors.some((c) => c.category === 'post-cap')
 
   if (design.windMph >= 115 && !hasRoofTies && assemblies.length > 0) {
     upliftFindings.push(`Wind ${design.windMph} mph requires roof-to-wall hurricane ties (H2.5A/H10A, IRC R802.11).`)
   }
-  if (design.windMph >= 130 && !hasStraps && assemblies.length > 0) {
+  if (design.windMph >= 130 && !hasStraps && hasStructure) {
     upliftFindings.push(`High wind (>=130 mph) requires continuous wall/floor uplift straps (MSTA36/CS16, WFCM).`)
   }
   if (
     (design.seismicCategory === 'D0' || design.seismicCategory === 'D1' || design.seismicCategory === 'D2' || design.windMph >= 130) &&
     !hasHoldDowns &&
-    assemblies.length > 0
+    hasStructure
   ) {
     upliftFindings.push(`SDC ${design.seismicCategory} / ${design.windMph} mph wind requires foundation hold-downs (HDU/STHD14).`)
   }
-  if (columns.length > 0 && !hasPostBases) {
-    upliftFindings.push('Columns present without standoff post bases (ABU/CB) anchored to footings (IRC R407.3).')
+
+  // Verify each individual column has a post base and (when supporting a beam) a post cap
+  const baseConnectors = connectors.filter((c) => c.category === 'post-base')
+  const capConnectors = connectors.filter((c) => c.category === 'post-cap')
+  const missingBases: string[] = []
+  const missingCaps: string[] = []
+  for (const col of columns) {
+    const cPos = col.position ?? [0, 0, 0]
+    const hasBase = baseConnectors.some(
+      (b) =>
+        (Array.isArray(b.attachedNodeIds) && b.attachedNodeIds.includes(col.id)) ||
+        (Array.isArray(b.position) && Math.hypot(b.position[0] - cPos[0], b.position[2] - cPos[2]) <= 0.45),
+    )
+    if (!hasBase) missingBases.push(col.id)
+    if (beams.length > 0) {
+      const hasCap = capConnectors.some(
+        (cap) =>
+          (Array.isArray(cap.attachedNodeIds) && cap.attachedNodeIds.includes(col.id)) ||
+          (Array.isArray(cap.position) && Math.hypot(cap.position[0] - cPos[0], cap.position[2] - cPos[2]) <= 0.45),
+      )
+      if (!hasCap) missingCaps.push(col.id)
+    }
   }
-  if (columns.length > 0 && beams.length > 0 && !hasPostCaps) {
-    upliftFindings.push('Beam-to-column bearing without post caps (BC/LPC/CCQ) resisting uplift/lateral displacement (IRC R502.9).')
+  if (missingBases.length > 0) {
+    upliftFindings.push(`Column(s) [${missingBases.join(', ')}] lack standoff post bases (ABU/CB) anchored to footings (IRC R407.3).`)
+  }
+  if (missingCaps.length > 0) {
+    upliftFindings.push(`Column(s) [${missingCaps.join(', ')}] lack post-to-beam caps (BC/LPC/CCQ) resisting uplift/lateral displacement (IRC R502.9).`)
   }
 
   const bracedWallLines = evaluateBracedWallLines({ nodes: params.nodes, design })
