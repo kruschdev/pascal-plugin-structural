@@ -571,6 +571,91 @@ export function autopopulateStructuralScene(
           })
         }
       }
+
+      // End-support columns for non-rectangular / L-shaped / U-shaped footprints where gStart or gEnd
+      // falls in open space without a bearing wall (perp <= 0.35 m) or existing column (within 0.45 m)
+      const girderDepthM = girderCheck.entry.depthIn * INCHES_TO_METERS
+      const girderBottomY = girderY - girderDepthM / 2
+      const isGirderEndSupported = (pt: Vec2): boolean => {
+        const onWall = walls.some((w) => {
+          const ws = w.start!
+          const we = w.end!
+          const len = Math.hypot(we[0] - ws[0], we[1] - ws[1])
+          if (len < 0.05) return false
+          const ux = (we[0] - ws[0]) / len
+          const uz = (we[1] - ws[1]) / len
+          const proj = (pt[0] - ws[0]) * ux + (pt[1] - ws[1]) * uz
+          const perp = Math.abs((pt[0] - ws[0]) * -uz + (pt[1] - ws[1]) * ux)
+          return proj >= -0.25 && proj <= len + 0.25 && perp <= 0.35
+        })
+        if (onWall) return true
+        const existingCols = [
+          ...levelNodes.filter((n) => n.type === 'structural:column'),
+          ...createdNodes.filter((n) => n.type === 'structural:column'),
+        ]
+        return existingCols.some((c) => {
+          const p = c.position ?? [0, 0, 0]
+          const colH = typeof c.heightM === 'number' ? c.heightM : 2.74
+          const colTopY = p[1] + colH
+          const planMatch = Math.hypot(p[0] - pt[0], p[2] - pt[1]) <= 0.45
+          const verticalMatch = p[1] <= girderBottomY + 0.35 && colTopY >= girderBottomY - 0.55
+          return planMatch && verticalMatch
+        })
+      }
+
+      const endAxialLbs = girderCheck.shearLbs
+      const endColSizing = sizeColumnAndFooting({
+        axialLoadLbs: endAxialLbs,
+        unbracedHeightFt: colHeightFt,
+        preferredType: options.preferredColumnType,
+        soilBearingPsf: design.soilBearingPsf,
+        frostDepthIn: design.frostDepthIn,
+      })
+
+      for (const [endTag, pt, attachedBayId] of [
+        ['Start', gStart, firstGirderId],
+        ['End', gEnd, lastGirderId],
+      ] as const) {
+        if (isGirderEndSupported(pt)) continue
+        const colId = nextId('strcol')
+        createdNodes.push({
+          id: colId,
+          type: 'structural:column',
+          name: `Girder End Support Post #${girderSeq}-${endTag} (${endColSizing.entry.designation})`,
+          parentId: levelId,
+          position: [
+            Number(pt[0].toFixed(3)),
+            Number((cluster.baseElevationM - cluster.avgWallHeightM).toFixed(3)),
+            Number(pt[1].toFixed(3)),
+          ],
+          heightM: Number(Math.max(0.8, cluster.avgWallHeightM - girderDepthM).toFixed(3)),
+          columnType: endColSizing.entry.columnType,
+          designation: endColSizing.entry.designation,
+          widthIn: endColSizing.entry.widthIn,
+          depthIn: endColSizing.entry.depthIn,
+          axialLoadLbs: endAxialLbs,
+          transfersFromNodeId: attachedBayId,
+          transfersToNodeId: includeFoundation ? `footing_${colId}` : undefined,
+          hasSquashBlocks: floorSystem === 'tji-ijoist',
+          footingWidthIn: includeFoundation ? endColSizing.footingWidthIn : 0,
+          footingDepthIn: includeFoundation ? endColSizing.footingDepthIn : 0,
+          footingRebar: includeFoundation ? endColSizing.footingRebar : 'Transfers to lower story',
+        })
+        emitConnector({
+          sku: endColSizing.recommendedCapSku,
+          position: [pt[0], girderBottomY, pt[1]],
+          attachedNodeIds: [colId, attachedBayId],
+          name: `${endColSizing.recommendedCapSku} End-Post-to-Girder Cap`,
+        })
+        if (includeFoundation) {
+          emitConnector({
+            sku: endColSizing.recommendedBaseSku,
+            position: [pt[0], cluster.baseElevationM - cluster.avgWallHeightM, pt[1]],
+            attachedNodeIds: [colId],
+            name: `${endColSizing.recommendedBaseSku} End-Post Standoff Base`,
+          })
+        }
+      }
     }
   }
 
@@ -763,23 +848,43 @@ export function autopopulateStructuralScene(
   }
 
   for (const bwl of bwlReports) {
-    if (bwl.requiredHoldDownSku) {
+    const hdSku =
+      bwl.requiredHoldDownSku ??
+      (!bwl.passes ? (bwl.bracingMethod === 'CS-PF' ? 'STHD14' : 'HDU5-SDS2.5') : null)
+    const bwlWallSet = new Set(bwl.wallIds)
+    const alreadyHasHoldDown = levelNodes.some(
+      (n) =>
+        n.type === 'structural:connector' &&
+        (n.category === 'hold-down' || /^(STHD|HDU|HTT)/i.test(String(n.sku ?? ''))) &&
+        Array.isArray(n.attachedNodeIds) &&
+        n.attachedNodeIds.some((id) => typeof id === 'string' && bwlWallSet.has(id)),
+    )
+    if (hdSku && !alreadyHasHoldDown) {
       const hdPos: Vec3 =
         bwl.axis === 'X' ? [minX + 0.15, levelBaseY, bwl.offsetM] : [bwl.offsetM, levelBaseY, minZ + 0.15]
       emitConnector({
-        sku: bwl.requiredHoldDownSku,
+        sku: hdSku,
         position: hdPos,
         quantity: 2,
-        attachedNodeIds: bwl.wallIds,
-        name: `${bwl.requiredHoldDownSku} Hold-Downs (${bwl.id}, x2 ends)`,
+        attachedNodeIds: [...bwl.wallIds, assemblyId],
+        name: `${hdSku} ${bwl.bracingMethod} Hold-Downs (${bwl.id}, x2 ends)`,
       })
       emitConnector({
         sku: 'SSTB16',
         position: hdPos,
         quantity: 2,
-        attachedNodeIds: bwl.wallIds,
+        attachedNodeIds: [...bwl.wallIds, assemblyId],
         name: `SSTB16 Hold-Down Anchor Bolts (${bwl.id}, x2)`,
       })
+      if (!bwl.passes && bwl.bracingMethod === 'CS-PF') {
+        emitConnector({
+          sku: 'CS-PF',
+          position: [hdPos[0], levelBaseY + Math.min(2.1, defaultWallHeightM - 0.3), hdPos[2]],
+          quantity: 2,
+          attachedNodeIds: [...bwl.wallIds, assemblyId],
+          name: `CS-PF Portal Frame Straps (${bwl.id}, x2)`,
+        })
+      }
     }
   }
 

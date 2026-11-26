@@ -182,11 +182,18 @@ export function evaluateBracedWallLines(params: {
     })
   }
 
+  const holdDownConnectors = all.filter((n) => {
+    if (n.type !== 'structural:connector') return false
+    const sku = typeof n.sku === 'string' ? n.sku.toUpperCase() : ''
+    return n.category === 'hold-down' || /^(STHD|HDU|HTT)/.test(sku)
+  })
+
   const reports: BracedWallLineReport[] = []
   const TOL_M = 1.2192 // exact 4 ft per IRC R602.10.1.1
   const levelKeys = [...new Set(entries.map((e) => e.levelKey))]
 
   for (const levelKey of levelKeys) {
+    const targetLevel = levelKey === 'default' ? null : levelKey
     for (const axis of ['X', 'Z'] as const) {
       const axisEntries = entries
         .filter((e) => e.levelKey === levelKey && e.axis === axis)
@@ -228,12 +235,22 @@ export function evaluateBracedWallLines(params: {
         const usesPortal = wspPercent < requiredPercent && portalExtraM > 0
         const bracedFt = usesPortal ? portalFt : wspFt
         const providedPercent = totalFt > 0 ? Math.min(100, Math.round((bracedFt / totalFt) * 100)) : 0
-        const passes = providedPercent >= requiredPercent
+        const prescriptivePasses = providedPercent >= requiredPercent
+
+        // Credit engineered shear wall / CS-PF portal frame remediation when hold-down hardware (STHD/HDU/HTT) is anchored to this BWL
+        const clusterWallIds = new Set(cluster.map((e) => e.wall.id))
+        const matchedHoldDown = holdDownConnectors.find((hdNode) => {
+          if (!sameLevelOrUnscoped(resolveNodeLevelId(params.nodes, hdNode), targetLevel)) return false
+          if (!Array.isArray(hdNode.attachedNodeIds)) return false
+          return hdNode.attachedNodeIds.some((id) => typeof id === 'string' && clusterWallIds.has(id))
+        })
+        const remediatedByHoldDown = !prescriptivePasses && Boolean(matchedHoldDown)
+        const passes = prescriptivePasses || remediatedByHoldDown
 
         let bracingMethod: BracedWallLineReport['bracingMethod'] = 'WSP'
         if (usesPortal) {
           bracingMethod = 'CS-PF'
-        } else if (!passes || (highLateral && providedPercent < requiredPercent + 10)) {
+        } else if (!prescriptivePasses || (highLateral && providedPercent < requiredPercent + 10)) {
           bracingMethod = 'Engineered-Shear'
         } else if (highLateral) {
           bracingMethod = 'CS-WSP'
@@ -280,9 +297,11 @@ export function evaluateBracedWallLines(params: {
               : bracingMethod === 'Engineered-Shear'
                 ? 'AWC SDPWS / IRC R602.10'
                 : 'IRC Table R602.10.3(1)/(3)',
-          note: passes
+          note: prescriptivePasses
             ? undefined
-            : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}%; add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
+            : remediatedByHoldDown
+              ? `Prescriptive bracing (${providedPercent}% < ${requiredPercent}%) remediated via ${bracingMethod} with ${String(matchedHoldDown?.sku ?? hd?.sku ?? 'STHD14')} hold-downs.`
+              : `Provided braced wall (${providedPercent}%) is below required ${requiredPercent}%; add CS-PF portal frame or engineered shear wall with ${hd?.sku ?? 'HDU5-SDS2.5'} hold-downs.`,
         })
       })
     }

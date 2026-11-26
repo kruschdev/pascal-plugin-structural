@@ -462,6 +462,12 @@ export type BeamCatalogEntry = {
   weightPlf: number
   /** Installed contractor cost per linear foot (USD, 2026) */
   costPerLfUsd: number
+  /** Optional AISC strong-axis moment of inertia Ix (in^4) */
+  ixIn4?: number
+  /** Optional AISC strong-axis elastic section modulus Sx (in^3) */
+  sxIn3?: number
+  /** Optional cross-sectional area A (in^2) */
+  areaIn2?: number
 }
 
 function woodBeamEntry(params: {
@@ -579,6 +585,9 @@ export const BEAM_CATALOG: readonly BeamCatalogEntry[] = [
     bearingPsi: 20_000,
     weightPlf: 18.0,
     costPerLfUsd: 54.0,
+    ixIn4: 61.9,
+    sxIn3: 15.2,
+    areaIn2: 5.26,
   },
   {
     id: 'steel-w10x22',
@@ -593,6 +602,9 @@ export const BEAM_CATALOG: readonly BeamCatalogEntry[] = [
     bearingPsi: 20_000,
     weightPlf: 22.0,
     costPerLfUsd: 66.0,
+    ixIn4: 118,
+    sxIn3: 23.2,
+    areaIn2: 6.49,
   },
   {
     id: 'steel-w12x26',
@@ -607,6 +619,9 @@ export const BEAM_CATALOG: readonly BeamCatalogEntry[] = [
     bearingPsi: 20_000,
     weightPlf: 26.0,
     costPerLfUsd: 78.0,
+    ixIn4: 204,
+    sxIn3: 33.4,
+    areaIn2: 7.65,
   },
   {
     id: 'steel-w12x40',
@@ -621,6 +636,9 @@ export const BEAM_CATALOG: readonly BeamCatalogEntry[] = [
     bearingPsi: 20_000,
     weightPlf: 40.0,
     costPerLfUsd: 118.0,
+    ixIn4: 310,
+    sxIn3: 51.9,
+    areaIn2: 11.7,
   },
   {
     id: 'steel-w14x30',
@@ -635,6 +653,94 @@ export const BEAM_CATALOG: readonly BeamCatalogEntry[] = [
     bearingPsi: 20_000,
     weightPlf: 30.0,
     costPerLfUsd: 92.0,
+    ixIn4: 291,
+    sxIn3: 42.0,
+    areaIn2: 8.85,
+  },
+  {
+    id: 'steel-w14x48',
+    family: 'steel-w',
+    designation: 'W14x48 A992 Steel Beam',
+    plyCount: 1,
+    widthIn: 8.03,
+    depthIn: 13.8,
+    allowableMomentFtLbs: 175_500,
+    allowableShearLbs: 70_380,
+    eiLbIn2: 14_036_000_000,
+    bearingPsi: 20_000,
+    weightPlf: 48.0,
+    costPerLfUsd: 142.0,
+    ixIn4: 484,
+    sxIn3: 70.2,
+    areaIn2: 14.1,
+  },
+  {
+    id: 'steel-w16x57',
+    family: 'steel-w',
+    designation: 'W16x57 A992 Steel Beam',
+    plyCount: 1,
+    widthIn: 7.12,
+    depthIn: 16.4,
+    allowableMomentFtLbs: 230_500,
+    allowableShearLbs: 105_780,
+    eiLbIn2: 21_982_000_000,
+    bearingPsi: 20_000,
+    weightPlf: 57.0,
+    costPerLfUsd: 168.0,
+    ixIn4: 758,
+    sxIn3: 92.2,
+    areaIn2: 16.8,
+  },
+  {
+    id: 'steel-w18x76',
+    family: 'steel-w',
+    designation: 'W18x76 A992 Steel Beam',
+    plyCount: 1,
+    widthIn: 11.0,
+    depthIn: 18.2,
+    allowableMomentFtLbs: 365_000,
+    allowableShearLbs: 116_025,
+    eiLbIn2: 38_570_000_000,
+    bearingPsi: 20_000,
+    weightPlf: 76.0,
+    costPerLfUsd: 224.0,
+    ixIn4: 1330,
+    sxIn3: 146,
+    areaIn2: 22.3,
+  },
+  {
+    id: 'steel-w21x93',
+    family: 'steel-w',
+    designation: 'W21x93 A992 Steel Beam',
+    plyCount: 1,
+    widthIn: 8.42,
+    depthIn: 21.6,
+    allowableMomentFtLbs: 480_000,
+    allowableShearLbs: 187_920,
+    eiLbIn2: 60_030_000_000,
+    bearingPsi: 20_000,
+    weightPlf: 93.0,
+    costPerLfUsd: 274.0,
+    ixIn4: 2070,
+    sxIn3: 192,
+    areaIn2: 27.3,
+  },
+  {
+    id: 'steel-w24x104',
+    family: 'steel-w',
+    designation: 'W24x104 A992 Steel Beam',
+    plyCount: 1,
+    widthIn: 12.8,
+    depthIn: 24.1,
+    allowableMomentFtLbs: 645_000,
+    allowableShearLbs: 180_750,
+    eiLbIn2: 89_900_000_000,
+    bearingPsi: 20_000,
+    weightPlf: 104.0,
+    costPerLfUsd: 308.0,
+    ixIn4: 3100,
+    sxIn3: 258,
+    areaIn2: 30.6,
   },
 ]
 

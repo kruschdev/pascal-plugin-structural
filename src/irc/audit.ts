@@ -536,6 +536,13 @@ export function auditStructuralScene(
     const lvlAsm = lvlId
       ? assemblies.find((a) => resolveNodeLevelId(nodes, a) === lvlId)
       : assemblies.find((a) => resolveNodeLevelId(nodes, a) === null) ?? assemblies[0]
+    if (lvlId !== null && assemblies.length > 0 && !lvlAsm) {
+      const lvlScopedNodes = Object.values(scopeNodes).filter((n) => belongsToLevel(scopeNodes, n, lvlId))
+      const lvlHasWalls = lvlScopedNodes.some((n) => n.type === 'wall' && n.visible !== false)
+      const lvlHasStructural = lvlScopedNodes.some((n) => String(n.type ?? '').startsWith('structural:'))
+      // Skip unwalled, unframed roof-deck/terrace levels when other walled stories are structurally framed
+      if (!lvlHasWalls && !lvlHasStructural) continue
+    }
     const floorSys =
       (lvlAsm?.floorSystem as 'dimensional' | 'tji-ijoist' | 'open-web-truss' | undefined) ?? 'dimensional'
     const hasRoofNode = Object.values(scopeNodes).some(
