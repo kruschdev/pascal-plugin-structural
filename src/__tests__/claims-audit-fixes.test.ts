@@ -10,7 +10,11 @@ import { buildBuildingSkeletonGroup } from '../cad/building-skeleton'
 import { STRUCTURAL_CAD_CATALOG } from '../cad/catalog'
 import { buildConnectorCad, getPostCapSeatOffsetM } from '../cad/connectors'
 import { structuralChatExtension } from '../index'
-import { auditStructuralScene, segmentIntersectsColumn } from '../irc/audit'
+import {
+  auditStructuralScene,
+  resolveMepRunExtents,
+  segmentIntersectsColumn,
+} from '../irc/audit'
 import { autopopulateStructuralScene } from '../irc/autopopulate'
 import { deriveRequiredFirestops } from '../irc/fireblocking'
 import { evaluateBracedWallLines, traceStructuralLoadPaths } from '../irc/load-path'
@@ -828,5 +832,194 @@ describe('Claims-vs-Reality Audit Fix Regression Suite (STR-01..STR-06)', () => 
     const connSrc = fs.readFileSync(path.join(rootDir, 'src/cad/connectors.ts'), 'utf8')
     expect(connSrc.includes('40 catalog SKUs')).toBe(false)
     expect(connSrc.includes('47 catalog SKUs')).toBe(true)
+  })
+
+  test('XT-07: real anisotropic MEP half-extents catch 14"x8" ducts & 4" DWV soffit/column slices without over-inflating 1/2" PEX/EMT', () => {
+    // 1) Direct unit verification of resolveMepRunExtents across all 3 MEP trade kinds
+    const rectDuctExt = resolveMepRunExtents({
+      id: 'd_rect',
+      type: 'hvac:duct-run',
+      shape: 'rectangular',
+      width: 14,
+      height: 8,
+    })
+    expect(rectDuctExt.halfXZ).toBeCloseTo((14 * INCHES_TO_METERS) / 2, 4)
+    expect(rectDuctExt.halfY).toBeCloseTo((8 * INCHES_TO_METERS) / 2, 4)
+
+    const roundDuctExt = resolveMepRunExtents({
+      id: 'd_round',
+      type: 'hvac:duct-run',
+      shape: 'round',
+      diameter: 8,
+    })
+    expect(roundDuctExt.halfXZ).toBeCloseTo((8 * INCHES_TO_METERS) / 2, 4)
+    expect(roundDuctExt.halfY).toBeCloseTo((8 * INCHES_TO_METERS) / 2, 4)
+
+    const dwv4Ext = resolveMepRunExtents({ id: 'p4', type: 'plumbing:pipe-run', nominalSize: '4"' })
+    const pexHalfExt = resolveMepRunExtents({ id: 'p05', type: 'plumbing:pipe-run', nominalSize: '1/2"' })
+    expect(dwv4Ext.halfY).toBeCloseTo(0.057, 3)
+    expect(pexHalfExt.halfY).toBeCloseTo(0.008, 3)
+
+    const emtHalfExt = resolveMepRunExtents({ id: 'c05', type: 'electrical:conduit-run', tradeSize: '1/2"' })
+    const emt2Ext = resolveMepRunExtents({ id: 'c2', type: 'electrical:conduit-run', tradeSize: '2"' })
+    expect(emtHalfExt.halfY).toBeCloseTo(0.011, 3)
+    expect(emt2Ext.halfY).toBeCloseTo(0.030, 3)
+
+    // 2) Live beam & column clash audit with real extents:
+    // Beam centered at y = 2.40 m, depth = 11.875" (0.3016 m) -> soffit at y = 2.2492 m
+    // Column at (6, 0, 2), 5.5"x5.5" (halfWidth = 0.06985 m) -> face at x = 6.06985 m
+    const beamSoffitY = 2.4 - (11.875 * INCHES_TO_METERS) / 2
+    const scene: Record<string, SceneNodeLike> = {
+      lvl1: { id: 'lvl1', type: 'level' },
+      bm1: {
+        id: 'bm1',
+        type: 'structural:beam',
+        parentId: 'lvl1',
+        start: [0, 2],
+        end: [4, 2],
+        elevationY: 2.4,
+        widthIn: 3.5,
+        depthIn: 11.875,
+      },
+      col1: {
+        id: 'col1',
+        type: 'structural:column',
+        parentId: 'lvl1',
+        position: [6, 0, 2],
+        heightM: 2.5,
+        widthIn: 5.5,
+        depthIn: 5.5,
+        footingWidthIn: 24,
+        footingDepthIn: 12,
+      },
+      // 14"x8" rect duct running 7 cm below beam soffit -> halfY = 10.16 cm > 7 cm -> MUST clash!
+      duct_slice_beam: {
+        id: 'duct_slice_beam',
+        type: 'hvac:duct-run',
+        parentId: 'lvl1',
+        shape: 'rectangular',
+        width: 14,
+        height: 8,
+        path: [
+          [1, beamSoffitY - 0.07, 0],
+          [1, beamSoffitY - 0.07, 4],
+        ],
+      },
+      // 4" DWV pipe running 4.5 cm below beam soffit -> halfY = 5.7 cm > 4.5 cm -> MUST clash!
+      dwv4_slice_beam: {
+        id: 'dwv4_slice_beam',
+        type: 'plumbing:pipe-run',
+        parentId: 'lvl1',
+        nominalSize: '4"',
+        path: [
+          [2, beamSoffitY - 0.045, 0],
+          [2, beamSoffitY - 0.045, 4],
+        ],
+      },
+      // 1/2" PEX pipe running 2.0 cm below beam soffit -> halfY = 0.8 cm < 2.0 cm -> MUST CLEAR (0 false positives)!
+      pex_clear_beam: {
+        id: 'pex_clear_beam',
+        type: 'plumbing:pipe-run',
+        parentId: 'lvl1',
+        nominalSize: '1/2"',
+        path: [
+          [3, beamSoffitY - 0.02, 0],
+          [3, beamSoffitY - 0.02, 4],
+        ],
+      },
+      // 14"x8" rect duct passing 12 cm outside col1 face (x = 6 + 0.07 + 0.12 = 6.19) -> halfXZ = 17.8 cm > 12 cm -> MUST clash!
+      duct_slice_col: {
+        id: 'duct_slice_col',
+        type: 'hvac:duct-run',
+        parentId: 'lvl1',
+        shape: 'rectangular',
+        width: 14,
+        height: 8,
+        path: [
+          [6.19, 1.5, 0],
+          [6.19, 1.5, 4],
+        ],
+      },
+      // 1/2" EMT conduit passing 2.0 cm outside col1 face (x = 6.09) -> halfXZ = 1.1 cm < 2.0 cm -> MUST CLEAR!
+      emt_clear_col: {
+        id: 'emt_clear_col',
+        type: 'electrical:conduit-run',
+        parentId: 'lvl1',
+        tradeSize: '1/2"',
+        path: [
+          [6.09, 1.5, 0],
+          [6.09, 1.5, 4],
+        ],
+      },
+    }
+
+    const audit = auditStructuralScene(scene)
+    const clashes = audit.findings.filter((f) => f.category === 'mep-clash')
+    expect(clashes.some((f) => f.nodeId === 'bm1' && f.message.includes('duct_slice_beam'))).toBe(true)
+    expect(clashes.some((f) => f.nodeId === 'bm1' && f.message.includes('dwv4_slice_beam'))).toBe(true)
+    expect(clashes.some((f) => f.message.includes('pex_clear_beam'))).toBe(false)
+    expect(clashes.some((f) => f.nodeId === 'col1' && f.message.includes('duct_slice_col'))).toBe(true)
+    expect(clashes.some((f) => f.message.includes('emt_clear_col'))).toBe(false)
+  })
+
+  test('XT-13: penetratingNodeId firestop matching requires spatial proximity (distPlan <= 1.25 m) so distant crossings are never silenced', () => {
+    // Attic run rises through top plate at (1, 2.7, 1), crosses attic at y = 3.1, and drops down through top plate at (8, 2.7, 1)
+    const baseScene: Record<string, SceneNodeLike> = {
+      lvl1: { id: 'lvl1', type: 'level' },
+      w1: { id: 'w1', type: 'wall', parentId: 'lvl1', start: [0, 1], end: [9, 1], height: 2.74 },
+      attic_pipe: {
+        id: 'attic_pipe',
+        type: 'plumbing:pipe-run',
+        parentId: 'lvl1',
+        nominalSize: '3/4"',
+        path: [
+          [1, 1.2, 1],
+          [1, 3.1, 1],
+          [8, 3.1, 1],
+          [8, 1.2, 1],
+        ],
+      },
+      // Single collar at x = 1 m ONLY (tagged with penetratingNodeId: 'attic_pipe')
+      fs_west: {
+        id: 'fs_west',
+        type: 'structural:firestop',
+        parentId: 'lvl1',
+        firestopKind: 'penetration-firestop',
+        material: 'intumescent-collar',
+        penetratingNodeId: 'attic_pipe',
+        start: [0.94, 1],
+        end: [1.06, 1],
+        elevationY: 2.7,
+      },
+    }
+
+    const auditMissingEast = auditStructuralScene(baseScene)
+    const penFindings1 = auditMissingEast.findings.filter(
+      (f) => f.category === 'fire-blocking' && f.codeRef === 'IRC R302.11(5)',
+    )
+    // West collar satisfies x=1 m, but east crossing at x=8 m (7 m away) MUST still be flagged!
+    expect(penFindings1.length).toBe(1)
+    expect(penFindings1[0]!.nodeId).toBe('attic_pipe')
+
+    // Adding second collar at x = 8 m clears the remaining IRC R302.11(5) finding
+    const withBothCollars: Record<string, SceneNodeLike> = {
+      ...baseScene,
+      fs_east: {
+        id: 'fs_east',
+        type: 'structural:firestop',
+        parentId: 'lvl1',
+        firestopKind: 'penetration-firestop',
+        material: 'intumescent-collar',
+        penetratingNodeId: 'attic_pipe',
+        start: [7.94, 1],
+        end: [8.06, 1],
+        elevationY: 2.7,
+      },
+    }
+    const auditBoth = auditStructuralScene(withBothCollars)
+    const penFindings2 = auditBoth.findings.filter(
+      (f) => f.category === 'fire-blocking' && f.codeRef === 'IRC R302.11(5)',
+    )
+    expect(penFindings2.length).toBe(0)
   })
 })

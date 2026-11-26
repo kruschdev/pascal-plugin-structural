@@ -53,6 +53,120 @@ export type StructuralAuditReport = {
   findings: StructuralAuditFinding[]
 }
 
+export type MepRunExtents = {
+  halfXZ: number
+  halfY: number
+}
+
+const PLUMBING_PIPE_HALF_OD_M: Readonly<Record<string, number>> = {
+  '1/2': 0.008,
+  '3/4': 0.011,
+  '1': 0.015,
+  '1-1/4': 0.021,
+  '1-1/2': 0.024,
+  '2': 0.030,
+  '2-1/2': 0.0365,
+  '3': 0.044,
+  '4': 0.057,
+  '6': 0.084,
+}
+
+const ELECTRICAL_CONDUIT_HALF_OD_M: Readonly<Record<string, number>> = {
+  '1/2': 0.011,
+  '3/4': 0.013,
+  '1': 0.017,
+  '1-1/4': 0.021,
+  '1-1/2': 0.024,
+  '2': 0.030,
+  '2-1/2': 0.036,
+  '3': 0.044,
+  '4': 0.057,
+}
+
+function normalizeNominalInchKey(raw: unknown): string | null {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return String(raw)
+  if (typeof raw !== 'string') return null
+  const cleaned = raw.trim().replace(/["'″\s]+/g, '')
+  return cleaned.length > 0 ? cleaned : null
+}
+
+function parseNominalInches(key: string): number | null {
+  const mixed = /^(\d+)-(\d+)\/(\d+)$/.exec(key)
+  if (mixed) {
+    const den = Number(mixed[3])
+    if (den > 0) return Number(mixed[1]) + Number(mixed[2]) / den
+  }
+  const frac = /^(\d+)\/(\d+)$/.exec(key)
+  if (frac) {
+    const den = Number(frac[2])
+    if (den > 0) return Number(frac[1]) / den
+  }
+  const num = Number(key)
+  return Number.isFinite(num) && num > 0 ? num : null
+}
+
+/**
+ * Resolve real physical half-extents (`halfXZ`, `halfY` in meters) for HVAC ducts,
+ * plumbing pipes, and electrical conduits so structural beam/column clash checks catch
+ * large ducts (e.g., 14"x8") and 3"/4" DWV stacks without over-inflating 1/2" PEX/EMT.
+ */
+export function resolveMepRunExtents(run: SceneNodeLike): MepRunExtents {
+  if (run.type === 'hvac:duct-run') {
+    if (run.shape === 'rectangular') {
+      const widthIn =
+        typeof run.width === 'number' && Number.isFinite(run.width) && run.width > 0 ? run.width : 10
+      const heightIn =
+        typeof run.height === 'number' && Number.isFinite(run.height) && run.height > 0 ? run.height : 8
+      return {
+        halfXZ: Math.max(0.025, (widthIn * INCHES_TO_METERS) / 2),
+        halfY: Math.max(0.025, (heightIn * INCHES_TO_METERS) / 2),
+      }
+    }
+    const diaIn =
+      typeof run.diameter === 'number' && Number.isFinite(run.diameter) && run.diameter > 0
+        ? run.diameter
+        : typeof run.width === 'number' && Number.isFinite(run.width) && run.width > 0
+          ? run.width
+          : 6
+    const r = Math.max(0.015, (diaIn * INCHES_TO_METERS) / 2)
+    return { halfXZ: r, halfY: r }
+  }
+
+  if (run.type === 'plumbing:pipe-run') {
+    const key = normalizeNominalInchKey(run.nominalSize ?? run.diameter)
+    if (key) {
+      if (key in PLUMBING_PIPE_HALF_OD_M) {
+        const r = PLUMBING_PIPE_HALF_OD_M[key]!
+        return { halfXZ: r, halfY: r }
+      }
+      const inches = parseNominalInches(key)
+      if (inches !== null) {
+        const r = Math.max(0.008, (inches * 1.12 * INCHES_TO_METERS) / 2)
+        return { halfXZ: r, halfY: r }
+      }
+    }
+    return { halfXZ: 0.025, halfY: 0.025 }
+  }
+
+  if (run.type === 'electrical:conduit-run') {
+    const key = normalizeNominalInchKey(run.tradeSize)
+    if (key) {
+      if (key in ELECTRICAL_CONDUIT_HALF_OD_M) {
+        const r = ELECTRICAL_CONDUIT_HALF_OD_M[key]!
+        return { halfXZ: r, halfY: r }
+      }
+      const inches = parseNominalInches(key)
+      if (inches !== null) {
+        const r = Math.max(0.011, (inches * 1.12 * INCHES_TO_METERS) / 2)
+        return { halfXZ: r, halfY: r }
+      }
+    }
+    return { halfXZ: 0.014, halfY: 0.014 }
+  }
+
+  return { halfXZ: 0.025, halfY: 0.025 }
+}
+
 /**
  * True 3D segment vs. Oriented Bounding Box (OBB) intersection for angled/diagonal beams.
  * Transforms segment `a -> b` into beam-local `(u along beam, y vertical, n transverse)` space
@@ -66,8 +180,10 @@ export function segmentIntersectsBeam(
   beamY: number,
   beamWidthM: number,
   beamDepthM: number,
-  mepRadiusM = 0.025,
+  mepExtents: number | MepRunExtents = 0.025,
 ): boolean {
+  const halfXZ = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfXZ
+  const halfY = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfY
   const bdx = beamEnd[0] - beamStart[0]
   const bdz = beamEnd[1] - beamStart[1]
   const beamLen = Math.hypot(bdx, bdz)
@@ -85,8 +201,8 @@ export function segmentIntersectsBeam(
 
   const la = toLocal(a)
   const lb = toLocal(b)
-  const minB: [number, number, number] = [-mepRadiusM, -beamDepthM / 2 - mepRadiusM, -beamWidthM / 2 - mepRadiusM]
-  const maxB: [number, number, number] = [beamLen + mepRadiusM, beamDepthM / 2 + mepRadiusM, beamWidthM / 2 + mepRadiusM]
+  const minB: [number, number, number] = [-halfXZ, -beamDepthM / 2 - halfY, -beamWidthM / 2 - halfXZ]
+  const maxB: [number, number, number] = [beamLen + halfXZ, beamDepthM / 2 + halfY, beamWidthM / 2 + halfXZ]
 
   let tMin = 0
   let tMax = 1
@@ -121,9 +237,11 @@ export function segmentIntersectsColumn(
   depthM: number,
   heightM: number,
   rotationY = 0,
-  mepRadiusM = 0.025,
+  mepExtents: number | MepRunExtents = 0.025,
 ): boolean {
   if (heightM <= 1e-4 || widthM <= 1e-4 || depthM <= 1e-4) return false
+  const halfXZ = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfXZ
+  const halfY = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfY
   const cos = Math.cos(rotationY)
   const sin = Math.sin(rotationY)
   // Inverse of Three.js Ry(rot): localX = dx*cos - dz*sin, localZ = dx*sin + dz*cos
@@ -135,8 +253,8 @@ export function segmentIntersectsColumn(
   }
   const la = toLocal(a)
   const lb = toLocal(b)
-  const minB: [number, number, number] = [-widthM / 2 - mepRadiusM, -mepRadiusM, -depthM / 2 - mepRadiusM]
-  const maxB: [number, number, number] = [widthM / 2 + mepRadiusM, heightM + mepRadiusM, depthM / 2 + mepRadiusM]
+  const minB: [number, number, number] = [-widthM / 2 - halfXZ, -halfY, -depthM / 2 - halfXZ]
+  const maxB: [number, number, number] = [widthM / 2 + halfXZ, heightM + halfY, depthM / 2 + halfXZ]
 
   let tMin = 0
   let tMax = 1
@@ -445,9 +563,11 @@ export function auditStructuralScene(
         const elevDiff = Math.abs((typeof fs.elevationY === 'number' ? fs.elevationY : req.elevationY) - req.elevationY)
         if (elevDiff > 0.75) return false
         if (req.hostWallId && fs.hostWallId) return fs.hostWallId === req.hostWallId
-        if (req.penetratingNodeId && fs.penetratingNodeId) return fs.penetratingNodeId === req.penetratingNodeId
         const fsMid = midOf(fs.start as Vec2 | undefined, fs.end as Vec2 | undefined)
         const distPlan = Math.hypot(fsMid[0] - reqMid[0], fsMid[1] - reqMid[1])
+        if (req.penetratingNodeId && fs.penetratingNodeId) {
+          return fs.penetratingNodeId === req.penetratingNodeId && distPlan <= 1.25
+        }
         return distPlan <= 1.25
       })
       if (!matched) {
@@ -504,6 +624,7 @@ export function auditStructuralScene(
   const reportedClashes = new Set<string>()
   for (const run of mepRuns) {
     const runLvl = resolveNodeLevelId(nodes, run)
+    const mepExtents = resolveMepRunExtents(run)
     const path = run.path as ReadonlyArray<Vec3>
     for (let i = 1; i < path.length; i++) {
       const a = path[i - 1]!
@@ -517,7 +638,7 @@ export function auditStructuralScene(
         const beamY = typeof beam.elevationY === 'number' ? beam.elevationY : 2.4
         const wM = (typeof beam.widthIn === 'number' ? beam.widthIn : 3.5) * INCHES_TO_METERS
         const dM = (typeof beam.depthIn === 'number' ? beam.depthIn : 11.875) * INCHES_TO_METERS
-        if (segmentIntersectsBeam(a, b, start, end, beamY, wM, dM)) {
+        if (segmentIntersectsBeam(a, b, start, end, beamY, wM, dM, mepExtents)) {
           reportedClashes.add(clashKey)
           push({
             severity: 'error',
@@ -543,7 +664,7 @@ export function auditStructuralScene(
             : Array.isArray(col.rotation) && typeof col.rotation[1] === 'number'
               ? col.rotation[1]
               : 0
-        if (segmentIntersectsColumn(a, b, colPos, wM, dM, hM, rotY)) {
+        if (segmentIntersectsColumn(a, b, colPos, wM, dM, hM, rotY, mepExtents)) {
           reportedClashes.add(clashKey)
           push({
             severity: 'error',
