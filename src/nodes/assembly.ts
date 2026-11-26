@@ -204,6 +204,7 @@ export const structuralAssemblyRenderDefinition: NodeDefinition<typeof Structura
     snappable: {},
   },
   geometry: buildStructuralAssemblyGeometry,
+  renderer: { kind: 'parametric', module: () => import('./assembly-renderer') },
   geometryKey: (n) =>
     JSON.stringify([
       n.assemblyKind,

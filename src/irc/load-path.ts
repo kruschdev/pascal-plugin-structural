@@ -3,6 +3,7 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
+import { extractWallOpenings } from './openings'
 import { selectHoldDownSku } from './sizing'
 import {
   DEFAULT_DESIGN_PARAMS,
@@ -72,7 +73,6 @@ export function evaluateBracedWallLines(params: {
     params.levelId ? belongsToLevel(params.nodes, n, params.levelId) : true,
   )
   const walls = all.filter((n) => n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end))
-  const doorsWindows = all.filter((n) => n.type === 'door' || n.type === 'window')
   const requiredPercent = getRequiredBracedWallPercent({
     windMph: design.windMph,
     seismicCategory: design.seismicCategory,
@@ -109,25 +109,12 @@ export function evaluateBracedWallLines(params: {
     const projMinM = axis === 'X' ? Math.min(start[0], end[0]) : Math.min(start[1], end[1])
     const projMaxM = axis === 'X' ? Math.max(start[0], end[0]) : Math.max(start[1], end[1])
 
-    // Split wall into real continuous solid pier intervals around child doors/windows
-    const childOpenings = doorsWindows.filter((o) => o.parentId === w.id)
-    const cuts: Array<[number, number]> = []
-    for (const o of childOpenings) {
-      const ow = typeof o.width === 'number' && o.width > 0 ? o.width : 0.91
-      let uCenter = lenM / 2
-      if (Array.isArray(o.position) && typeof o.position[0] === 'number') {
-        const px = o.position[0]
-        const pz = typeof o.position[2] === 'number' ? o.position[2] : 0
-        if (Math.abs(pz) < 0.4 && px >= -0.2 && px <= lenM + 0.2) {
-          uCenter = px
-        } else {
-          const ux = (end[0] - start[0]) / lenM
-          const uz = (end[1] - start[1]) / lenM
-          uCenter = (px - start[0]) * ux + (pz - start[1]) * uz
-        }
-      }
-      cuts.push([Math.max(0, uCenter - ow / 2), Math.min(lenM, uCenter + ow / 2)])
-    }
+    // Split wall into real continuous solid pier intervals around child doors/windows (both native & Pascal `item` openings)
+    const childOpenings = extractWallOpenings(params.nodes, w)
+    const cuts: Array<[number, number]> = childOpenings.map((o) => [
+      Math.max(0, o.uCenterM - o.widthM / 2),
+      Math.min(lenM, o.uCenterM + o.widthM / 2),
+    ])
     cuts.sort((a, b) => a[0] - b[0])
     const solidSpans: number[] = []
     let cursor = 0

@@ -53,6 +53,8 @@ export type StructuralUiState = {
   preferredBeamFamily: BeamMaterialFamily
   preferredColumnType: ColumnType
   activeTab: StructuralScheduleTab
+  xrayActive: boolean
+  wallModeBeforeXray: string | null
   hiddenLayers: Readonly<Record<StructuralLayerKey, boolean>>
   setCodeEdition: (v: StructuralDesignParams['codeEdition']) => void
   setSpecies: (v: LumberSpecies) => void
@@ -69,6 +71,8 @@ export type StructuralUiState = {
   setPreferredBeamFamily: (v: BeamMaterialFamily) => void
   setPreferredColumnType: (v: ColumnType) => void
   setActiveTab: (v: StructuralScheduleTab) => void
+  setXrayActive: (v: boolean) => void
+  setWallModeBeforeXray: (v: string | null) => void
   toggleLayerVisibility: (layer: StructuralLayerKey) => void
   resetDesignDefaults: () => void
 }
@@ -100,6 +104,8 @@ export const useStructuralUi = create<StructuralUiState>((set) => ({
   preferredBeamFamily: 'lvl',
   preferredColumnType: 'wood-solid',
   activeTab: 'beams',
+  xrayActive: false,
+  wallModeBeforeXray: null,
   hiddenLayers: { ...DEFAULT_HIDDEN_LAYERS },
 
   setCodeEdition: (codeEdition) => set({ codeEdition }),
@@ -117,6 +123,8 @@ export const useStructuralUi = create<StructuralUiState>((set) => ({
   setPreferredBeamFamily: (preferredBeamFamily) => set({ preferredBeamFamily }),
   setPreferredColumnType: (preferredColumnType) => set({ preferredColumnType }),
   setActiveTab: (activeTab) => set({ activeTab }),
+  setXrayActive: (xrayActive) => set({ xrayActive }),
+  setWallModeBeforeXray: (wallModeBeforeXray) => set({ wallModeBeforeXray }),
   toggleLayerVisibility: (layer) =>
     set((s) => ({
       hiddenLayers: { ...s.hiddenLayers, [layer]: !s.hiddenLayers[layer] },

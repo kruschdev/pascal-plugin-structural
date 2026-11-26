@@ -8,6 +8,7 @@ import { openEditorView, useScene, useViewer } from '@pascal-app/editor'
 import { useEffect, useMemo, useState } from 'react'
 import { structuralAgentOperations } from '../agent-operations'
 import { auditStructuralScene } from '../irc/audit'
+import { computeLevelBounds } from '../irc/openings'
 import type {
   BeamMaterialFamily,
   ColumnType,
@@ -34,6 +35,8 @@ const ASSEMBLY_LAYER_KEYS: ReadonlySet<StructuralLayerKey> = new Set([
   'floor',
   'roof',
   'foundation',
+  'connectors',
+  'firestop',
 ])
 
 export function activeLevelOf(
@@ -170,6 +173,8 @@ export default function StructuralHostPanel() {
   const soilBearingPsf = useStructuralUi((s) => s.soilBearingPsf)
   const preferredBeamFamily = useStructuralUi((s) => s.preferredBeamFamily)
   const preferredColumnType = useStructuralUi((s) => s.preferredColumnType)
+  const xrayActive = useStructuralUi((s) => s.xrayActive)
+  const wallModeBeforeXray = useStructuralUi((s) => s.wallModeBeforeXray)
   const hiddenLayers = useStructuralUi((s) => s.hiddenLayers)
   const setSpecies = useStructuralUi((s) => s.setSpecies)
   const setStudSize = useStructuralUi((s) => s.setStudSize)
@@ -183,7 +188,28 @@ export default function StructuralHostPanel() {
   const setPreferredBeamFamily = useStructuralUi((s) => s.setPreferredBeamFamily)
   const setPreferredColumnType = useStructuralUi((s) => s.setPreferredColumnType)
   const setActiveTab = useStructuralUi((s) => s.setActiveTab)
+  const setXrayActive = useStructuralUi((s) => s.setXrayActive)
+  const setWallModeBeforeXray = useStructuralUi((s) => s.setWallModeBeforeXray)
   const toggleLayerVisibility = useStructuralUi((s) => s.toggleLayerVisibility)
+
+  const applyXrayMode = (enable: boolean) => {
+    const viewerState = useViewer.getState() as unknown as {
+      wallMode?: string
+      setWallMode?: (mode: string) => void
+    }
+    if (enable) {
+      if (viewerState.setWallMode && viewerState.wallMode !== 'down') {
+        setWallModeBeforeXray(viewerState.wallMode ?? 'up')
+        viewerState.setWallMode('down')
+      }
+      setXrayActive(true)
+    } else {
+      if (viewerState.setWallMode && viewerState.wallMode === 'down') {
+        viewerState.setWallMode(wallModeBeforeXray ?? 'up')
+      }
+      setXrayActive(false)
+    }
+  }
 
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [placeIdx, setPlaceIdx] = useState(0)
@@ -285,6 +311,7 @@ export default function StructuralHostPanel() {
       design: designParams,
     })
     commitCreatedNodes(outcome.createdNodes ?? [], true)
+    applyXrayMode(true)
     setStatusMsg(outcome.text)
   }
 
@@ -296,6 +323,7 @@ export default function StructuralHostPanel() {
     runAsSingleSceneHistoryStep(useScene, () => {
       deleteNodes(ids as never)
     })
+    applyXrayMode(false)
     setStatusMsg(`Cleared ${ids.length} structural node(s)${levelId ? ' on active level' : ''}.`)
   }
 
@@ -332,14 +360,18 @@ export default function StructuralHostPanel() {
       setStatusMsg('Create a building level first before placing beams.')
       return
     }
-    const offset = (placeIdx % 5) * 0.6
+    const b = computeLevelBounds(record, levelId)
+    const cx = (b.minX + b.maxX) / 2
+    const cz = (b.minZ + b.maxZ) / 2
+    const halfSpan = Math.max(1.5, Math.min(2.4, (b.maxX - b.minX) * 0.35))
+    const offset = ((placeIdx % 5) - 2) * 0.45
     setPlaceIdx((i) => i + 1)
     setPreferredBeamFamily(family)
     const outcome = structuralAgentOperations.structural_place_beam(record, {
       levelId,
-      start: [0.5, 1.0 + offset],
-      end: [4.16, 1.0 + offset],
-      elevationY: 2.4,
+      start: [Number((cx - halfSpan).toFixed(2)), Number((cz + offset).toFixed(2))],
+      end: [Number((cx + halfSpan).toFixed(2)), Number((cz + offset).toFixed(2))],
+      elevationY: Number(Math.max(2.1, b.avgWallHeightM - 0.18).toFixed(2)),
       role: 'floor-girder',
       preferredFamily: family,
       species,
@@ -355,13 +387,16 @@ export default function StructuralHostPanel() {
       setStatusMsg('Create a building level first before placing columns.')
       return
     }
-    const offset = (placeIdx % 6) * 0.5
+    const b = computeLevelBounds(record, levelId)
+    const cx = (b.minX + b.maxX) / 2
+    const cz = (b.minZ + b.maxZ) / 2
+    const offset = ((placeIdx % 5) - 2) * 0.5
     setPlaceIdx((i) => i + 1)
     setPreferredColumnType(columnType)
     const outcome = structuralAgentOperations.structural_place_column(record, {
       levelId,
-      position: [1.0 + offset, 0, 1.0 + offset],
-      heightM: 2.7432,
+      position: [Number((cx + offset).toFixed(2)), 0, Number((cz + offset).toFixed(2))],
+      heightM: Number(b.avgWallHeightM.toFixed(3)),
       axialLoadLbs: columnType === 'steel-hss' ? 24000 : columnType === 'psl' ? 16000 : 10000,
       preferredType: columnType,
       soilBearingPsf,
@@ -378,12 +413,15 @@ export default function StructuralHostPanel() {
       setStatusMsg('Create a building level first before placing connectors.')
       return
     }
-    const offset = (placeIdx % 8) * 0.35
+    const b = computeLevelBounds(record, levelId)
+    const cx = (b.minX + b.maxX) / 2
+    const cz = (b.minZ + b.maxZ) / 2
+    const offset = ((placeIdx % 7) - 3) * 0.3
     setPlaceIdx((i) => i + 1)
     const outcome = structuralAgentOperations.structural_place_connector(record, {
       levelId,
       sku,
-      position: [0.6 + offset, 2.4, 0.6],
+      position: [Number((cx + offset).toFixed(2)), Number(b.avgWallHeightM.toFixed(2)), Number(cz.toFixed(2))],
       quantity: 1,
     })
     if (outcome.createdNodes && outcome.createdNodes.length > 0) {
@@ -397,15 +435,18 @@ export default function StructuralHostPanel() {
       setStatusMsg('Create a building level first before placing fire blocking.')
       return
     }
-    const offset = (placeIdx % 5) * 0.5
+    const b = computeLevelBounds(record, levelId)
+    const cx = (b.minX + b.maxX) / 2
+    const cz = (b.minZ + b.maxZ) / 2
+    const offset = ((placeIdx % 5) - 2) * 0.45
     setPlaceIdx((i) => i + 1)
     const isPoint = kind === 'penetration-firestop'
     const outcome = structuralAgentOperations.structural_place_firestop(record, {
       levelId,
       firestopKind: kind,
-      start: [0.5, 0.5 + offset],
-      end: isPoint ? [0.65, 0.5 + offset] : [3.5, 0.5 + offset],
-      elevationY: kind === 'floor-draftstop' ? -0.3 : 2.4,
+      start: [Number((cx - (isPoint ? 0.08 : 1.5)).toFixed(2)), Number((cz + offset).toFixed(2))],
+      end: [Number((cx + (isPoint ? 0.08 : 1.5)).toFixed(2)), Number((cz + offset).toFixed(2))],
+      elevationY: kind === 'floor-draftstop' ? -0.3 : Number(Math.max(2.1, b.avgWallHeightM - 0.1).toFixed(2)),
       heightM: isPoint ? 0.08 : 0.3,
     })
     commitCreatedNodes(outcome.createdNodes ?? [], false)
@@ -424,6 +465,34 @@ export default function StructuralHostPanel() {
         <strong style={{ fontSize: 13 }}>Structural ({codeEdition})</strong>
         <button type="button" onClick={() => openSchedule()} style={primaryBtnStyle}>
           Schedule &amp; Audit
+        </button>
+      </div>
+
+      {/* View Mode (Finished vs Engineering X-Ray) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+        <button
+          type="button"
+          onClick={() => applyXrayMode(false)}
+          style={{
+            ...ghostBtnStyle,
+            borderColor: !xrayActive ? 'rgba(245,158,11,0.75)' : 'var(--border, rgba(255,255,255,0.18))',
+            background: !xrayActive ? 'rgba(245,158,11,0.16)' : 'transparent',
+            fontWeight: !xrayActive ? 600 : 400,
+          }}
+        >
+          Finished View
+        </button>
+        <button
+          type="button"
+          onClick={() => applyXrayMode(true)}
+          style={{
+            ...ghostBtnStyle,
+            borderColor: xrayActive ? 'rgba(56,189,248,0.8)' : 'var(--border, rgba(255,255,255,0.18))',
+            background: xrayActive ? 'rgba(56,189,248,0.18)' : 'transparent',
+            fontWeight: xrayActive ? 600 : 400,
+          }}
+        >
+          Framing X-Ray
         </button>
       </div>
 

@@ -4,6 +4,7 @@
  */
 
 export * from './tables'
+export * from './openings'
 export * from './sizing'
 export * from './fireblocking'
 export * from './load-path'

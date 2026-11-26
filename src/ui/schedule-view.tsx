@@ -620,15 +620,16 @@ function EmptyBanner({ text }: { text: string }) {
   )
 }
 
-const tableStyle = { width: '100%', borderCollapse: 'collapse' as const, fontSize: 11 }
+const tableStyle = { width: '100%', borderCollapse: 'collapse' as const, fontSize: 10.5 }
 const thStyle = {
   textAlign: 'left' as const,
-  padding: '6px 8px',
+  padding: '5px 5px',
   borderBottom: '1px solid var(--border, rgba(255,255,255,0.16))',
   opacity: 0.8,
+  whiteSpace: 'nowrap' as const,
 }
 const tdStyle = {
-  padding: '6px 8px',
+  padding: '5px 5px',
   borderBottom: '1px solid var(--border, rgba(255,255,255,0.08))',
 }
 const btnStyle = {

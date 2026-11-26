@@ -9,6 +9,7 @@
 
 import { deriveRequiredFirestops } from './fireblocking'
 import { evaluateBracedWallLines } from './load-path'
+import { extractWallOpenings } from './openings'
 import {
   selectBeamHangerSku,
   selectHurricaneTieSku,
@@ -108,7 +109,6 @@ export function autopopulateStructuralScene(
 
   const levelNodes = Object.values(nodes).filter((n) => belongsToLevel(nodes, n, levelId))
   const walls = levelNodes.filter((n) => n.type === 'wall' && Array.isArray(n.start) && Array.isArray(n.end))
-  const openings = levelNodes.filter((n) => n.type === 'door' || n.type === 'window')
   const slabs = levelNodes.filter((n) => n.type === 'slab' && Array.isArray(n.polygon) && n.polygon.length >= 3)
   const roofs = levelNodes.filter((n) => n.type === 'roof' || n.type === 'roof-segment')
   const zones = levelNodes.filter((n) => n.type === 'zone' || n.type === 'room')
@@ -300,10 +300,8 @@ export function autopopulateStructuralScene(
     })
   }
 
-  // 4. Size & emit `structural:beam` headers for every door & window opening + opening connectors
-  for (const op of openings) {
-    const hostWall = walls.find((w) => w.id === op.parentId)
-    if (!hostWall) continue
+  // 4. Size & emit `structural:beam` headers for every door & window opening (native + Pascal `item` openings)
+  for (const hostWall of walls) {
     const ws = hostWall.start!
     const we = hostWall.end!
     const lenM = Math.hypot(we[0] - ws[0], we[1] - ws[1])
@@ -311,78 +309,78 @@ export function autopopulateStructuralScene(
     const ux = (we[0] - ws[0]) / lenM
     const uz = (we[1] - ws[1]) / lenM
     const yaw = Math.atan2(-(we[1] - ws[1]), we[0] - ws[0])
+    const wallH = typeof hostWall.height === 'number' && hostWall.height > 1.2 ? hostWall.height : defaultWallHeightM
+    const wallBaseY = typeof hostWall.elevation === 'number' && Number.isFinite(hostWall.elevation) ? hostWall.elevation : 0
+    const wallOpenings = extractWallOpenings(nodes, hostWall)
 
-    const opWidthM = typeof op.width === 'number' ? op.width : op.type === 'door' ? 0.9144 : 1.2192
-    const opHeightM = typeof op.height === 'number' ? op.height : op.type === 'door' ? 2.032 : 1.2192
-    const sillM = typeof op.sillHeight === 'number' ? op.sillHeight : op.type === 'door' ? 0 : 0.9144
-    const centerU =
-      Array.isArray(op.position) && typeof op.position[0] === 'number'
-        ? Math.max(opWidthM / 2 + 0.15, Math.min(lenM - opWidthM / 2 - 0.15, op.position[0]))
-        : lenM / 2
-
-    const spanFt = opWidthM * METERS_TO_FEET
-    const isBearing = wallOverrides[hostWall.id]?.isLoadBearing ?? true
-    const effTribFt = isBearing ? Number(Math.min(18, shortSpanFt / 2).toFixed(1)) : 2
-    const effLivePsf =
-      design.storiesAbove > 0
-        ? design.floorLiveLoadPsf
-        : Math.max(design.roofLiveLoadPsf, design.groundSnowPsf)
-    const headerSizing = sizeBeamOrHeader({
-      spanFt,
-      tributaryWidthFt: effTribFt,
-      role: 'header',
-      preferredFamily: spanFt > 8 ? (options.preferredBeamFamily ?? 'lvl') : options.preferredBeamFamily,
-      snowLoadPsf: design.groundSnowPsf,
-      liveLoadPsf: effLivePsf,
-      deadLoadPsf: design.roofDeadLoadPsf,
-      species: design.species,
-      storiesSupported: design.storiesAbove,
-    })
-
-    const halfRun = opWidthM / 2 + headerSizing.jackStudsEachEnd * 1.5 * INCHES_TO_METERS
-    const startPt: Vec2 = [ws[0] + ux * Math.max(0, centerU - halfRun), ws[1] + uz * Math.max(0, centerU - halfRun)]
-    const endPt: Vec2 = [ws[0] + ux * Math.min(lenM, centerU + halfRun), ws[1] + uz * Math.min(lenM, centerU + halfRun)]
-    const headerY = Math.min(defaultWallHeightM - 0.12, sillM + opHeightM + (headerSizing.entry.depthIn * INCHES_TO_METERS) / 2)
-
-    const beamId = nextId('strbm')
-    createdNodes.push({
-      id: beamId,
-      type: 'structural:beam',
-      name: `Header (${headerSizing.entry.designation}) over ${op.type} ${op.id}`,
-      parentId: levelId,
-      start: startPt,
-      end: endPt,
-      elevationY: Number(headerY.toFixed(3)),
-      role: 'header',
-      beamType: headerSizing.entry.family,
-      designation: headerSizing.entry.designation,
-      plyCount: headerSizing.entry.plyCount,
-      widthIn: headerSizing.entry.widthIn,
-      depthIn: headerSizing.entry.depthIn,
-      species: design.species,
-      mountStyle: 'flush',
-      tributaryWidthFt: effTribFt,
-      liveLoadPsf: effLivePsf,
-      deadLoadPsf: design.roofDeadLoadPsf,
-      snowLoadPsf: design.groundSnowPsf,
-      bearingLengthIn: headerSizing.requiredBearingIn,
-      jackStudsEachEnd: headerSizing.jackStudsEachEnd,
-      endReactionLbs: headerSizing.shearLbs,
-      hostWallId: hostWall.id,
-      openingId: op.id,
-    })
-
-    // High-wind or wide-opening header-to-king uplift straps (LSTA24 / CS-PF)
-    if (design.windMph >= 120 || spanFt >= 6) {
-      const strapSku = spanFt >= 8 && shearWallIds.has(hostWall.id) ? 'CS-PF' : 'LSTA24'
-      emitConnector({
-        sku: strapSku,
-        position: [startPt[0], headerY, startPt[1]],
-        rotation: yaw,
-        quantity: 2,
-        attachedNodeIds: [beamId, hostWall.id],
-        name: `${strapSku} Header Uplift Straps (${op.id})`,
+    for (const op of wallOpenings) {
+      const opWidthM = op.widthM
+      const centerU = op.uCenterM
+      const spanFt = opWidthM * METERS_TO_FEET
+      const isBearing = wallOverrides[hostWall.id]?.isLoadBearing ?? true
+      const effTribFt = isBearing ? Number(Math.min(18, shortSpanFt / 2).toFixed(1)) : 2
+      const effLivePsf =
+        design.storiesAbove > 0
+          ? design.floorLiveLoadPsf
+          : Math.max(design.roofLiveLoadPsf, design.groundSnowPsf)
+      const headerSizing = sizeBeamOrHeader({
+        spanFt,
+        tributaryWidthFt: effTribFt,
+        role: 'header',
+        preferredFamily: spanFt > 8 ? (options.preferredBeamFamily ?? 'lvl') : options.preferredBeamFamily,
+        snowLoadPsf: design.groundSnowPsf,
+        liveLoadPsf: effLivePsf,
+        deadLoadPsf: design.roofDeadLoadPsf,
+        species: design.species,
+        storiesSupported: design.storiesAbove,
       })
+
+      const halfRun = opWidthM / 2 + headerSizing.jackStudsEachEnd * 1.5 * INCHES_TO_METERS
+      const startPt: Vec2 = [ws[0] + ux * Math.max(0, centerU - halfRun), ws[1] + uz * Math.max(0, centerU - halfRun)]
+      const endPt: Vec2 = [ws[0] + ux * Math.min(lenM, centerU + halfRun), ws[1] + uz * Math.min(lenM, centerU + halfRun)]
+      const headerDepthM = headerSizing.entry.depthIn * INCHES_TO_METERS
+      const headerY = Math.min(wallBaseY + wallH - 0.08 - headerDepthM / 2, wallBaseY + op.headYM + headerDepthM / 2)
+
+      const beamId = nextId('strbm')
+      createdNodes.push({
+        id: beamId,
+        type: 'structural:beam',
+        name: `Header (${headerSizing.entry.designation}) over ${op.name}`,
+        parentId: levelId,
+        start: startPt,
+        end: endPt,
+        elevationY: Number(headerY.toFixed(3)),
+        role: 'header',
+        beamType: headerSizing.entry.family,
+        designation: headerSizing.entry.designation,
+        plyCount: headerSizing.entry.plyCount,
+        widthIn: headerSizing.entry.widthIn,
+        depthIn: headerSizing.entry.depthIn,
+        species: design.species,
+        mountStyle: 'flush',
+        tributaryWidthFt: effTribFt,
+        liveLoadPsf: effLivePsf,
+        deadLoadPsf: design.roofDeadLoadPsf,
+        snowLoadPsf: design.groundSnowPsf,
+        bearingLengthIn: headerSizing.requiredBearingIn,
+        jackStudsEachEnd: headerSizing.jackStudsEachEnd,
+        endReactionLbs: headerSizing.shearLbs,
+        hostWallId: hostWall.id,
+        openingId: op.id,
+      })
+
+      // High-wind or wide-opening header-to-king uplift straps (LSTA24 / CS-PF)
+      if (design.windMph >= 120 || spanFt >= 6) {
+        const strapSku = spanFt >= 8 && shearWallIds.has(hostWall.id) ? 'CS-PF' : 'LSTA24'
+        emitConnector({
+          sku: strapSku,
+          position: [startPt[0], headerY, startPt[1]],
+          rotation: yaw,
+          quantity: 2,
+          attachedNodeIds: [beamId, hostWall.id],
+          name: `${strapSku} Header Uplift Straps (${op.id})`,
+        })
+      }
     }
   }
 

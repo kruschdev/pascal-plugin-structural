@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import type { InstancedMesh } from 'three'
+import { buildBuildingSkeletonGroup } from '../cad/building-skeleton'
 import { auditStructuralScene, segmentIntersectsBeam } from '../irc/audit'
 import { autopopulateStructuralScene } from '../irc/autopopulate'
 import { deriveRequiredFirestops } from '../irc/fireblocking'
 import { evaluateBracedWallLines, traceStructuralLoadPaths } from '../irc/load-path'
+import { extractWallOpenings } from '../irc/openings'
 import { generateStructuralBom } from '../irc/pricing'
 import {
   calcColumnCapacityLbs,
@@ -448,5 +451,84 @@ describe('Round 1 Gemini 4 Carbon Audit Regression Suite', () => {
     expect(steepRidge.recommendedRidgeBeam!.uniformLoadPlf).toBeGreaterThan(
       flatRidge.recommendedRidgeBeam!.uniformLoadPlf,
     )
+  })
+
+  test('Visual Audit V1/V2/V5: extracts Pascal item door/window openings, emits headers in autopopulate, and builds full-house InstancedMesh 3D skeleton', () => {
+    const scene: Record<string, SceneNodeLike> = {
+      lvl1: { id: 'lvl1', type: 'level', height: 2.55 },
+      w1: {
+        id: 'w1',
+        type: 'wall',
+        parentId: 'lvl1',
+        start: [0, 0],
+        end: [6, 0],
+        height: 3.35,
+        children: ['win_item_1', 'door_item_1'],
+      },
+      w2: { id: 'w2', type: 'wall', parentId: 'lvl1', start: [6, 0], end: [6, 5], height: 2.55 },
+      win_item_1: {
+        id: 'win_item_1',
+        type: 'item',
+        parentId: 'w1',
+        name: 'Window-double',
+        position: [2.0, 0.9, 0],
+        asset: { id: 'window-double', category: 'window', dimensions: [1.8, 1.2, 0.2] },
+      },
+      door_item_1: {
+        id: 'door_item_1',
+        type: 'item',
+        parentId: 'w1',
+        name: 'glass-door',
+        position: [4.5, 0, 0],
+        asset: { id: 'glass-door', category: 'door', dimensions: [1.5, 2.1, 0.2] },
+      },
+      slab1: {
+        id: 'slab1',
+        type: 'slab',
+        parentId: 'lvl1',
+        elevation: 0.05,
+        polygon: [
+          [0, 0],
+          [6, 0],
+          [6, 5],
+          [0, 5],
+        ],
+      },
+      roof1: {
+        id: 'roof1',
+        type: 'roof',
+        parentId: 'lvl1',
+        position: [3, 0, 2.5],
+        length: 6,
+        leftWidth: 2.5,
+        rightWidth: 2.5,
+        height: 1.5,
+      },
+    }
+
+    const openings = extractWallOpenings(scene, scene.w1!)
+    expect(openings.length).toBe(2)
+    expect(openings[0]!.kind).toBe('window')
+    expect(openings[0]!.widthM).toBeCloseTo(1.8, 2)
+    expect(openings[1]!.kind).toBe('door')
+    expect(openings[1]!.widthM).toBeCloseTo(1.5, 2)
+
+    // Autopopulate must emit real engineered headers for BOTH Pascal item openings
+    const auto = autopopulateStructuralScene(scene, { levelId: 'lvl1', floorSystem: 'tji-ijoist', roofSystem: 'fink-truss' })
+    const headers = auto.createdNodes.filter((n) => n.type === 'structural:beam' && n.role === 'header')
+    expect(headers.length).toBe(2)
+
+    const asm = auto.createdNodes.find((n) => n.type === 'structural:assembly')!
+    const skeleton = buildBuildingSkeletonGroup({ assembly: asm, nodes: scene })
+    const meshNames = skeleton.children.map((c) => c.name)
+    expect(meshNames).toContain('structural-skeleton-lumber')
+    expect(meshNames).toContain('structural-skeleton-pt-sill')
+    expect(meshNames).toContain('structural-skeleton-header-lvl')
+    expect(meshNames).toContain('structural-skeleton-osb-web')
+    expect(meshNames).toContain('structural-skeleton-galv-steel')
+    expect(meshNames).toContain('structural-skeleton-concrete')
+    expect(meshNames).toContain('structural-skeleton-firestop')
+    const totalInstances = skeleton.children.reduce((s, c) => s + ((c as InstancedMesh).count ?? 0), 0)
+    expect(totalInstances).toBeGreaterThan(80)
   })
 })
