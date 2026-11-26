@@ -9,6 +9,9 @@ An open-source, MIT-licensed **Residential and Light-Commercial IRC / AWC NDS / 
 
 I built this as a standalone external plugin implementing Pascal's full Plugin API v1 and `E-016` agent contracts so it drops cleanly into any Pascal host without requiring upstream core merges. It anchors **Priority #1** in the 4-trade right-of-way hierarchy (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`).
 
+> [!NOTE]
+> **Early Development Status:** This plugin is still in the beginning stages of being refined and is not yet at the same level of polish, depth, or completeness as my [Pascal Electrical Plugin (`@kruschdev/pascal-plugin-electrical`)](https://github.com/kruschdev/pascal-plugin-electrical). Expect active iteration on layout rules, 3D framing, and edge cases as I continue building it out.
+
 ## Walkthrough Video (Recorded Live in Pascal Editor)
 
 ![Live Pascal Editor Walkthrough: One-Click IRC/NDS Auto-Frame on Craftsman 32x24 House, Live Switch from Stick Rafters to Prefab Fink W-Trusses, Structural Layer Peeling, Quick-Place Steel HSS Column, HDU5 Hold-Down & Firestop, and Split-Pane 7-Tab Engineering Schedule & Priced BOM](./assets/demo-walkthrough.gif)
