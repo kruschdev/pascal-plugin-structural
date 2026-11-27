@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * InspectorExtension card for `structural:*` nodes:
  * Shows live COMPLIANT / NOT TO CODE badge, exact beam utilization/deflection/jack-studs,

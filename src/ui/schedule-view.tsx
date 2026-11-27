@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * Full-pane EditorHostView (`krusch:structural:schedule`) that opens beside the 3D/2D scene:
  * 7 Tabs:

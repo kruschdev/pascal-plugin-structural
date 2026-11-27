@@ -22,11 +22,7 @@ import {
   structuralConnectorParametrics,
   structuralFirestopParametrics,
 } from './nodes/parametrics'
-import { STRUCTURAL_PLUGIN_ID, structuralRenderPlugin } from './render'
-import StructuralChatCard from './ui/chat-card'
-import StructuralInspectorCard from './ui/inspector-card'
-import StructuralScheduleView from './ui/schedule-view'
-import StructuralHostPanel, { STRUCTURAL_SCHEDULE_VIEW_ID } from './ui/structural-panel'
+import { STRUCTURAL_PLUGIN_ID, STRUCTURAL_SCHEDULE_VIEW_ID, structuralRenderPlugin } from './render'
 
 export const structuralInspectorExtensions: InspectorExtension[] = [
   {
@@ -41,7 +37,7 @@ export const structuralInspectorExtensions: InspectorExtension[] = [
     ],
     icon: { kind: 'iconify', name: 'lucide:blocks' },
     title: 'IRC / NDS Structural Engineering',
-    component: () => Promise.resolve({ default: StructuralInspectorCard }),
+    component: () => import('./ui/inspector-card'),
   },
 ]
 
@@ -102,7 +98,7 @@ export const structuralHostPanel: EditorHostPanel = {
   },
   pluginUrl: 'https://github.com/kruschdev/pascal-plugin-structural',
   icon: { kind: 'iconify', name: 'lucide:blocks' },
-  component: () => Promise.resolve({ default: StructuralHostPanel }),
+  component: () => import('./ui/structural-panel'),
   defaultInstalled: false,
 }
 
@@ -113,7 +109,7 @@ export const structuralScheduleView: EditorHostView = {
   description:
     'Beams & Headers, Columns & Footings, Simpson-class Connectors & Fasteners, IRC R302.11/R302.12 Fire Blocking, Load Path & Bracing, IRC Audit, and Priced BOM.',
   icon: { kind: 'iconify', name: 'lucide:table' },
-  component: () => Promise.resolve({ default: StructuralScheduleView }),
+  component: () => import('./ui/schedule-view'),
   workspaces: ['edit'],
   defaultPinned: false,
 }
@@ -121,15 +117,15 @@ export const structuralScheduleView: EditorHostView = {
 export const structuralChatExtension: PluginChatExtension = {
   pluginId: STRUCTURAL_PLUGIN_ID,
   cards: {
-    structural_autopopulate_irc: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_place_beam: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_place_column: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_place_connector: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_place_firestop: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_size_member: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_trace_load_path: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_audit_irc: () => Promise.resolve({ default: StructuralChatCard }),
-    structural_generate_schedule: () => Promise.resolve({ default: StructuralChatCard }),
+    structural_autopopulate_irc: () => import('./ui/chat-card'),
+    structural_place_beam: () => import('./ui/chat-card'),
+    structural_place_column: () => import('./ui/chat-card'),
+    structural_place_connector: () => import('./ui/chat-card'),
+    structural_place_firestop: () => import('./ui/chat-card'),
+    structural_size_member: () => import('./ui/chat-card'),
+    structural_trace_load_path: () => import('./ui/chat-card'),
+    structural_audit_irc: () => import('./ui/chat-card'),
+    structural_generate_schedule: () => import('./ui/chat-card'),
   },
   actions: [
     {
@@ -156,6 +152,7 @@ export const structuralChatExtension: PluginChatExtension = {
 
 export {
   STRUCTURAL_PLUGIN_ID,
+  STRUCTURAL_SCHEDULE_VIEW_ID,
   structuralRenderPlugin,
   StructuralAssemblyNode,
   AssemblyKindEnum,
@@ -177,5 +174,4 @@ export {
   FirestopKindEnum,
   FirestopMaterialEnum,
 } from './render'
-export { STRUCTURAL_SCHEDULE_VIEW_ID } from './ui/structural-panel'
 export * from './irc'

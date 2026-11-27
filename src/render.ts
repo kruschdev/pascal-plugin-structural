@@ -12,6 +12,7 @@ import { structuralConnectorRenderDefinition } from './nodes/connector'
 import { structuralFirestopRenderDefinition } from './nodes/firestop'
 
 export const STRUCTURAL_PLUGIN_ID = 'krusch:structural' as const
+export const STRUCTURAL_SCHEDULE_VIEW_ID = 'krusch:structural:schedule' as const
 
 export const structuralRenderPlugin: Plugin = {
   id: STRUCTURAL_PLUGIN_ID,

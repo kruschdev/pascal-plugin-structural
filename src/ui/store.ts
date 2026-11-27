@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * Isolated Zustand UI state store for `krusch:structural`.
  * Never mutates or extends Pascal's `useScene`, `useEditor`, or `useViewer` stores.
