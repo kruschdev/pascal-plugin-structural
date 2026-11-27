@@ -684,4 +684,176 @@ describe('Round 3 Structural Visual & Geometry Regression Suite (VIS-V3-01/02/06
     const repMissing = auditStructuralScene(missingBathEw)
     expect(repMissing.findings.some((f) => f.category === 'fire-blocking' && f.message.includes('East/West edge, Kid bathroom'))).toBe(true)
   })
+
+  test('User Annotated Fix 1: zero-gap roof bearing extension bridges level.height (2.8m) vs wall.height (2.5m) on both adopted upper roofs and directly-parented 1-story wing roofs', () => {
+    const STACK_H = 2.8
+    const WALL_H = 2.5
+    const nodes: Record<string, SceneNodeLike> = {
+      bldg: { id: 'bldg', type: 'building' },
+      lvl0: { id: 'lvl0', type: 'level', parentId: 'bldg', level: 0, height: STACK_H },
+      lvl1: { id: 'lvl1', type: 'level', parentId: 'bldg', level: 1, height: STACK_H },
+      lvl2_roof: { id: 'lvl2_roof', type: 'level', parentId: 'bldg', level: 2, height: 0 },
+      // Main floor right 1-story wing: X[5..10], Z[-4..4], explicit wall.height = 2.5m under level.height = 2.8m
+      w0_1: { id: 'w0_1', type: 'wall', parentId: 'lvl0', start: [5, -4], end: [10, -4], height: WALL_H },
+      w0_2: { id: 'w0_2', type: 'wall', parentId: 'lvl0', start: [10, -4], end: [10, 4], height: WALL_H },
+      w0_3: { id: 'w0_3', type: 'wall', parentId: 'lvl0', start: [10, 4], end: [5, 4], height: WALL_H },
+      w0_4: { id: 'w0_4', type: 'wall', parentId: 'lvl0', start: [5, 4], end: [5, -4], height: WALL_H },
+      // Floor 2 left 2-story core: X[-10..-4], Z[-4..4], explicit wall.height = 2.5m under level.height = 2.8m
+      w1_1: { id: 'w1_1', type: 'wall', parentId: 'lvl1', start: [-10, -4], end: [-4, -4], height: WALL_H },
+      w1_2: { id: 'w1_2', type: 'wall', parentId: 'lvl1', start: [-4, -4], end: [-4, 4], height: WALL_H },
+      w1_3: { id: 'w1_3', type: 'wall', parentId: 'lvl1', start: [-4, 4], end: [-10, 4], height: WALL_H },
+      w1_4: { id: 'w1_4', type: 'wall', parentId: 'lvl1', start: [-10, 4], end: [-10, -4], height: WALL_H },
+      // Adopted gable roof over Floor 2 core (wallHeight = 0.5m)
+      r_upper_gable: {
+        id: 'r_upper_gable',
+        type: 'roof-segment',
+        parentId: 'lvl2_roof',
+        position: [-7, 0, 0],
+        rotation: 0,
+        roofType: 'gable',
+        width: 6,
+        depth: 8,
+        pitch: 30,
+        overhang: 0.3,
+        wallHeight: 0.5,
+      },
+      // Directly-parented 1-story hip roof on Floor 2 at py = 0 over Main floor's 2.5m right wing (wallHeight = 0.5m)
+      r_wing_hip: {
+        id: 'r_wing_hip',
+        type: 'roof-segment',
+        parentId: 'lvl1',
+        position: [7.5, 0, 0],
+        rotation: 0,
+        roofType: 'hip',
+        width: 5,
+        depth: 8,
+        pitch: 35,
+        overhang: 0.3,
+        wallHeight: 0.5,
+      },
+    }
+
+    const skelLvl1 = buildBuildingSkeletonGroup({ assembly: roofOnlyAssembly('lvl1'), nodes })
+    const lumber = extractBucketInstances(skelLvl1, 'lumber')
+
+    // Gap #1 (Floor 2 gable): gable rake studs & raised-heel knee wall extend all the way down to localY = 2.50m (0.00m gap!)
+    const upperGableBearing = lumber.filter((m) => m.center.x < -3.5)
+    expect(upperGableBearing.length).toBeGreaterThan(20)
+    const upperMinY = Math.min(...upperGableBearing.map((m) => m.minY))
+    expect(upperMinY).toBeCloseTo(WALL_H, 2)
+
+    // Gap #2 (1-story right hip wing on Floor 2): raised-heel knee wall extends down to localY = -0.30m (worldY = 2.50m, 0.00m gap!)
+    const rightWingBearing = lumber.filter((m) => m.center.x > 4.5)
+    expect(rightWingBearing.length).toBeGreaterThan(20)
+    const rightWingMinY = Math.min(...rightWingBearing.map((m) => m.minY))
+    expect(rightWingMinY).toBeCloseTo(WALL_H - STACK_H, 2)
+  })
+
+  test('User Annotated Fix 2: uncovered 1-story central flat-roofed connecting wing gets 24" OC flat joists at bearing wall top (zero joists over Pool/Lanai or under Floor 2)', () => {
+    const STACK_H = 2.8
+    const WALL_H = 2.5
+    const nodes: Record<string, SceneNodeLike> = {
+      bldg: { id: 'bldg', type: 'building' },
+      lvl0: { id: 'lvl0', type: 'level', parentId: 'bldg', level: 0, height: STACK_H },
+      lvl1: { id: 'lvl1', type: 'level', parentId: 'bldg', level: 1, height: STACK_H },
+      // Main floor U-shape: left wing X[-12..-6], central bar X[-6..4.5] Z[-8..1.5], right wing X[4.5..9]
+      w0_n: { id: 'w0_n', type: 'wall', parentId: 'lvl0', start: [-12, -8], end: [9, -8], height: WALL_H },
+      w0_e: { id: 'w0_e', type: 'wall', parentId: 'lvl0', start: [9, -8], end: [9, 6], height: WALL_H },
+      w0_se: { id: 'w0_se', type: 'wall', parentId: 'lvl0', start: [9, 6], end: [4.5, 6], height: WALL_H },
+      w0_m1: { id: 'w0_m1', type: 'wall', parentId: 'lvl0', start: [4.5, 6], end: [4.5, 1.5], height: WALL_H },
+      w0_mid: { id: 'w0_mid', type: 'wall', parentId: 'lvl0', start: [4.5, 1.5], end: [-6, 1.5], height: WALL_H },
+      w0_m2: { id: 'w0_m2', type: 'wall', parentId: 'lvl0', start: [-6, 1.5], end: [-6, 6], height: WALL_H },
+      w0_sw: { id: 'w0_sw', type: 'wall', parentId: 'lvl0', start: [-6, 6], end: [-12, 6], height: WALL_H },
+      w0_w: { id: 'w0_w', type: 'wall', parentId: 'lvl0', start: [-12, 6], end: [-12, -8], height: WALL_H },
+      // Indoor living/kitchen zone in central connecting bar
+      z_living: {
+        id: 'z_living',
+        type: 'zone',
+        parentId: 'lvl0',
+        name: 'Living room',
+        polygon: [
+          [-6, -8],
+          [4.5, -8],
+          [4.5, 1.5],
+          [-6, 1.5],
+        ],
+      },
+      // Outdoor Lanai & Pool in courtyard Z[1.5..8.5] — MUST receive ZERO flat-roof joists!
+      z_lanai: {
+        id: 'z_lanai',
+        type: 'zone',
+        parentId: 'lvl0',
+        name: 'Lanai',
+        polygon: [
+          [-6, 1.5],
+          [4.5, 1.5],
+          [4.5, 6],
+          [-6, 6],
+        ],
+      },
+      z_pool: {
+        id: 'z_pool',
+        type: 'zone',
+        parentId: 'lvl0',
+        name: 'Pool',
+        polygon: [
+          [-5, 6],
+          [3.5, 6],
+          [3.5, 9],
+          [-5, 9],
+        ],
+      },
+      // Floor 2 covers ONLY left wing X[-12..-6], Z[-8..6]
+      w1_1: { id: 'w1_1', type: 'wall', parentId: 'lvl1', start: [-12, -8], end: [-6, -8], height: WALL_H },
+      w1_2: { id: 'w1_2', type: 'wall', parentId: 'lvl1', start: [-6, -8], end: [-6, 6], height: WALL_H },
+      w1_3: { id: 'w1_3', type: 'wall', parentId: 'lvl1', start: [-6, 6], end: [-12, 6], height: WALL_H },
+      w1_4: { id: 'w1_4', type: 'wall', parentId: 'lvl1', start: [-12, 6], end: [-12, -8], height: WALL_H },
+      // Right 1-story wing covered by explicit hip roof directly parented on Floor 2
+      r_right: {
+        id: 'r_right',
+        type: 'roof-segment',
+        parentId: 'lvl1',
+        position: [6.75, 0, -1],
+        rotation: 0,
+        roofType: 'hip',
+        width: 4.5,
+        depth: 14,
+        pitch: 35,
+        overhang: 0.3,
+        wallHeight: 0.5,
+      },
+      // Standard auto-framed Main floor assembly has visibleSystems.roof = false (per VIS-X7)
+      strasm_lvl0: {
+        id: 'strasm_lvl0',
+        type: 'structural:assembly',
+        parentId: 'lvl0',
+        visibleSystems: { walls: true, floor: true, roof: false, beams: true, connectors: true, foundation: true },
+      },
+    }
+
+    // 1. Rendered via Floor 2's roof pass (live DB / VIS-X7 path when Main floor has roof: false)
+    const skelLvl1 = buildBuildingSkeletonGroup({ assembly: roofOnlyAssembly('lvl1'), nodes })
+    const lumber1 = extractBucketInstances(skelLvl1, 'lumber')
+    const flatJoists1 = lumber1.filter(
+      (m) => m.center.x > -5.8 && m.center.x < 4.3 && m.center.z > -7.8 && m.center.z < 1.3 && m.center.y < 0.05 && m.center.y > -0.35,
+    )
+    expect(flatJoists1.length).toBeGreaterThanOrEqual(8)
+    // Seated cleanly at localY = -0.30..-0.059 (worldY = 2.50..2.741m)
+    expect(Math.min(...flatJoists1.map((m) => m.minY))).toBeCloseTo(WALL_H - STACK_H, 2)
+    // ZERO joists over outdoor Lanai / Pool courtyard (Z > 1.7)
+    const overCourtyard = lumber1.filter((m) => m.center.x > -5.5 && m.center.x < 4.2 && m.center.z > 1.7)
+    expect(overCourtyard).toHaveLength(0)
+
+    // 2. Rendered directly on Main floor when Main floor assembly has roof: true
+    const skelLvl0 = buildBuildingSkeletonGroup({ assembly: roofOnlyAssembly('lvl0'), nodes })
+    const lumber0 = extractBucketInstances(skelLvl0, 'lumber')
+    const flatJoists0 = lumber0.filter(
+      (m) => m.center.x > -5.8 && m.center.x < 4.3 && m.center.z > -7.8 && m.center.z < 1.3,
+    )
+    expect(flatJoists0.length).toBeGreaterThanOrEqual(8)
+    expect(Math.min(...flatJoists0.map((m) => m.minY))).toBeCloseTo(WALL_H, 2)
+    // ZERO joists inside Floor 2's footprint (X < -6.3) or over Lanai/Pool (Z > 1.7)
+    expect(lumber0.filter((m) => m.center.x < -6.3)).toHaveLength(0)
+    expect(lumber0.filter((m) => m.center.z > 1.7)).toHaveLength(0)
+  })
 })
