@@ -6,15 +6,15 @@ Ready-to-share narrated walkthrough video, high-resolution screenshots, 4-panel 
 
 | Asset | Resolution / Format | Best Use |
 |---|---|---|
-| [`assets/social-preview.png`](../assets/social-preview.png) | `1280 x 640` PNG | GitHub Social Preview, OpenGraph card, LinkedIn/X link banner |
-| [`assets/demo-walkthrough.mp4`](../assets/demo-walkthrough.mp4) | `1280 x 720` H.264 MP4 (`62.9s`, narrated AAC + `+faststart`) | X video post, LinkedIn native video, YouTube, GitHub Release |
-| [`assets/demo-walkthrough.gif`](../assets/demo-walkthrough.gif) | `640px` palette-optimized GIF | README preview, Reddit, Discord, Slack |
-| [`assets/demo-stick-rafter.png`](../assets/demo-stick-rafter.png) | `1440 x 810` PNG | Live Pascal Editor Framing X-Ray showing 2x6 DF-L #2 studs, TJI I-joists, stick rafters, LVL ridge beam & headers |
-| [`assets/demo-fink-truss.png`](../assets/demo-fink-truss.png) | `1440 x 810` PNG | Live Pascal Editor Framing X-Ray showing prefab Fink W-truss roof with galvanized gusset plates & open-web floor trusses |
-| [`assets/demo-walls-headers.png`](../assets/demo-walls-headers.png) | `1440 x 810` PNG | Live Pascal Editor wall framing close-up (roof layer peeled): PT mudsills cut at doors, double top plates, 3-stud corners, kings, jacks & headers |
-| [`assets/demo-structural-cutaways.png`](../assets/demo-structural-cutaways.png) | `1920 x 760` PNG | 4-panel studio 3D Structural Cutaways showcase (Wall & Header, TJI Floor, Fink Roof Truss, IRC R602.10 Seismic Shear Wall) |
-| [`assets/demo-structural-schedule.png`](../assets/demo-structural-schedule.png) | `1440 x 810` PNG | Live split-pane 3D Framing X-Ray house + populated 7-Tab Structural Engineering Schedule |
-| [`assets/cad-material-catalog.png`](../assets/cad-material-catalog.png) | `1920 x 2794` PNG | Complete 62-model clean-room MIT Structural CAD catalog contact sheet (6x11 studio grid) |
+| [`assets/social-preview.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/social-preview.png) | `1280 x 640` PNG | GitHub Social Preview, OpenGraph card, LinkedIn/X link banner |
+| [`assets/demo-walkthrough.mp4`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-walkthrough.mp4) | `1280 x 720` H.264 MP4 (`62.9s`, narrated AAC + `+faststart`) | X video post, LinkedIn native video, YouTube, GitHub Release |
+| [`assets/demo-walkthrough.gif`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-walkthrough.gif) | `640px` palette-optimized GIF | README preview, Reddit, Discord, Slack |
+| [`assets/demo-stick-rafter.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-stick-rafter.png) | `1440 x 810` PNG | Live Pascal Editor Framing X-Ray showing 2x6 DF-L #2 studs, TJI I-joists, stick rafters, LVL ridge beam & headers |
+| [`assets/demo-fink-truss.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-fink-truss.png) | `1440 x 810` PNG | Live Pascal Editor Framing X-Ray showing prefab Fink W-truss roof with galvanized gusset plates & open-web floor trusses |
+| [`assets/demo-walls-headers.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-walls-headers.png) | `1440 x 810` PNG | Live Pascal Editor wall framing close-up (roof layer peeled): PT mudsills cut at doors, double top plates, 3-stud corners, kings, jacks & headers |
+| [`assets/demo-structural-cutaways.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-structural-cutaways.png) | `1920 x 760` PNG | 4-panel studio 3D Structural Cutaways showcase (Wall & Header, TJI Floor, Fink Roof Truss, IRC R602.10 Seismic Shear Wall) |
+| [`assets/demo-structural-schedule.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-structural-schedule.png) | `1440 x 810` PNG | Live split-pane 3D Framing X-Ray house + populated 7-Tab Structural Engineering Schedule |
+| [`assets/cad-material-catalog.png`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/cad-material-catalog.png) | `1920 x 2794` PNG | Complete 62-model clean-room MIT Structural CAD catalog contact sheet (6x11 studio grid) |
 | [`docs/WALKTHROUGH-SCRIPT.md`](./WALKTHROUGH-SCRIPT.md) | Markdown Beat Sheet | Timed ~60-second chapter-by-chapter narration script & TTS input text |
 | [`scripts/add-voiceover.sh`](../scripts/add-voiceover.sh) | Bash (`gemini-api tts` + `ffmpeg`) | One-command Gemini TTS synthesis (`gemini-3.8-flash-tts`) and AAC muxing into `assets/demo-walkthrough-narrated.mp4` |
 

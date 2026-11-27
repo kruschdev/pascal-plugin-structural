@@ -89,7 +89,7 @@ const DesignParamsSchema = z
 export const structuralAgentTools: PluginAgentTools = {
   pluginId: 'krusch:structural',
   apiVersion: 1,
-  version: '0.1.0',
+  version: '0.2.0',
   instructions:
     'Structural (`krusch:structural`) holds Priority #1 right-of-way (1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical). Always establish `structural:assembly`, `structural:beam`, `structural:column`, `structural:connector`, and `structural:firestop` nodes before routing MEP runs. Engineered beams (LVL/Glulam/PSL/Flitch/Steel) and columns are strict no-bore keep-out zones for Plumbing and Electrical.',
   skills: [

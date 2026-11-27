@@ -21,23 +21,23 @@ Watch the full two-story Aymeric House finished-to-cutaway walkthrough (Structur
 
 ## Walkthrough Video (Recorded Live in Pascal Editor)
 
-![Live Pascal Editor Walkthrough: One-Click IRC/NDS Auto-Frame on Craftsman 32x24 House, Live Switch from Stick Rafters to Prefab Fink W-Trusses, Structural Layer Peeling, Quick-Place Steel HSS Column, HDU5 Hold-Down & Firestop, and Split-Pane 7-Tab Engineering Schedule & Priced BOM](./assets/demo-walkthrough.gif)
+![Live Pascal Editor Walkthrough: One-Click IRC/NDS Auto-Frame on Craftsman 32x24 House, Live Switch from Stick Rafters to Prefab Fink W-Trusses, Structural Layer Peeling, Quick-Place Steel HSS Column, HDU5 Hold-Down & Firestop, and Split-Pane 7-Tab Engineering Schedule & Priced BOM](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-walkthrough.gif)
 
-**[Watch Full 720p HD Walkthrough Video Recorded in Pascal Editor (`assets/demo-walkthrough.mp4`)](./assets/demo-walkthrough.mp4)**
+**[Watch Full 720p HD Walkthrough Video Recorded in Pascal Editor (`assets/demo-walkthrough.mp4`)](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-walkthrough.mp4)**
 
 ## Showcase Gallery
 
-![4-Panel 3D Structural Assembly Cutaways: Wall Framing & Window Header (IRC R602.7), TJI I-Joist & LVL Girder Floor System (IRC R502), Fink Roof Truss & H2.5A Hurricane Ties (IRC R802.10), and Seismic Braced Shear Wall with Dual HDU5 Hold-Downs & BP3x3 Washers (IRC R602.10)](./assets/demo-structural-cutaways.png)
+![4-Panel 3D Structural Assembly Cutaways: Wall Framing & Window Header (IRC R602.7), TJI I-Joist & LVL Girder Floor System (IRC R502), Fink Roof Truss & H2.5A Hurricane Ties (IRC R802.10), and Seismic Braced Shear Wall with Dual HDU5 Hold-Downs & BP3x3 Washers (IRC R602.10)](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-structural-cutaways.png)
 
-![Full-Building 3D Stick-Rafter Structural Framing Skeleton with LVL Ridge Beam, Framing X-Ray Cutaway, and Engineered Headers](./assets/demo-stick-rafter.png)
+![Full-Building 3D Stick-Rafter Structural Framing Skeleton with LVL Ridge Beam, Framing X-Ray Cutaway, and Engineered Headers](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-stick-rafter.png)
 
-![Prefab Fink W-Truss Roof System with Galvanized Steel Gusset Connector Plates, Gable Rake Studs, and Framing X-Ray](./assets/demo-fink-truss.png)
+![Prefab Fink W-Truss Roof System with Galvanized Steel Gusset Connector Plates, Gable Rake Studs, and Framing X-Ray](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-fink-truss.png)
 
-![Wall Framing Close-Up: Pressure-Treated Mudsills Cut at Doors, Double Top Plates, 3-Stud Corners, King/Jack Studs, Engineered LVL Headers, Double Window Sills, and Bounded Cripples](./assets/demo-walls-headers.png)
+![Wall Framing Close-Up: Pressure-Treated Mudsills Cut at Doors, Double Top Plates, 3-Stud Corners, King/Jack Studs, Engineered LVL Headers, Double Window Sills, and Bounded Cripples](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-walls-headers.png)
 
-![Split-Pane Pascal Editor 3D Framing X-Ray Viewport and Live Populated 7-Tab Structural Engineering Schedule](./assets/demo-structural-schedule.png)
+![Split-Pane Pascal Editor 3D Framing X-Ray Viewport and Live Populated 7-Tab Structural Engineering Schedule](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/demo-structural-schedule.png)
 
-![62 Clean-Room MIT Structural CAD Models (.glb): Built-Up, LSL, LVL, PSL, Glulam, Flitch & Steel W-Beams, TJI I-Joists, Prefab Trusses, Columns & Footings, 47 Simpson-Class Connectors, Fire Blocking & Structural Assembly Cutaways](./assets/cad-material-catalog.png)
+![62 Clean-Room MIT Structural CAD Models (.glb): Built-Up, LSL, LVL, PSL, Glulam, Flitch & Steel W-Beams, TJI I-Joists, Prefab Trusses, Columns & Footings, 47 Simpson-Class Connectors, Fire Blocking & Structural Assembly Cutaways](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/cad-material-catalog.png)
 
 ### 62-Model Clean-Room MIT CAD Library (7 Categories)
 

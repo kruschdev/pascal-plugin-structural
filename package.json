@@ -1,6 +1,6 @@
 {
   "name": "@kruschdev/pascal-plugin-structural",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Residential & Light-Commercial IRC/AWC/NDS/AISC structural framing, engineered LVL/Glulam/PSL/steel/flitch beams, Simpson-class connector schedules, full IRC R302.11/R302.12 fire blocking & draftstopping, and continuous load-path plugin for Pascal Editor.",
   "author": "Kevin Ruschman <kruschdev@users.noreply.github.com>",
   "license": "MIT",

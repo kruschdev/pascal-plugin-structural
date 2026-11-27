@@ -5,3 +5,4 @@ assets/cad/*.glb
 task.md
 .DS_Store
 *.log
+assets/

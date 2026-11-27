@@ -1,8 +1,8 @@
 # 62-Model Clean-Room MIT Structural 3D CAD Library
 
-Every structural beam, truss, column, Simpson-class connector, firestop, and framing cutaway in [`@kruschdev/pascal-plugin-structural/cad`](../src/cad/index.ts) is built procedurally from clean-room Three.js PBR geometry (MIT license, zero third-party meshes) and pre-exported to binary `.glb` + studio `.png` thumbnails in [`assets/cad/`](../assets/cad/catalog.json).
+Every structural beam, truss, column, Simpson-class connector, firestop, and framing cutaway in [`@kruschdev/pascal-plugin-structural/cad`](../src/cad/index.ts) is built procedurally from clean-room Three.js PBR geometry (MIT license, zero third-party meshes) and pre-exported to binary `.glb` + studio `.png` thumbnails in [`assets/cad/`](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/structural-cad-models-v0.2.0.tar.gz).
 
-![62 Clean-Room MIT Structural CAD Models](../assets/cad-material-catalog.png)
+![62 Clean-Room MIT Structural CAD Models](https://github.com/kruschdev/pascal-plugin-structural/releases/download/v0.2.0/cad-material-catalog.png)
 
 ## Programmatic Usage (`./cad`)
 
