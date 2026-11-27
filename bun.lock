@@ -5,7 +5,7 @@
     "": {
       "name": "@kruschdev/pascal-plugin-structural",
       "dependencies": {
-        "@kruschdev/pascal-mep-kernel": "file:../pascal-mep-kernel",
+        "@kruschdev/pascal-mep-kernel": "^0.1.0",
       },
       "devDependencies": {
         "@pascal-app/core": "1.1.6",
@@ -135,7 +135,7 @@
 
     "@jscadui/3mf-export": ["@jscadui/3mf-export@0.5.0", "", {}, "sha512-y5vZktqCjyi7wA38zqNlLIdZUIRZoOO9vCjLzwmL4bR0hk7B/Zm1IeffzJPFe1vFc0C1IEv3hm8caDv3doRk9g=="],
 
-    "@kruschdev/pascal-mep-kernel": ["@kruschdev/pascal-mep-kernel@file:../pascal-mep-kernel", { "devDependencies": { "@types/bun": "^1.3.5", "typescript": "^5.9.3" } }],
+    "@kruschdev/pascal-mep-kernel": ["@kruschdev/pascal-mep-kernel@0.1.0", "", {}, "sha512-FyRl9Nm40ICu4bRWgVWiRUyKKYzmm4dSaNBRwB6iEUl4laYMYzXA4sWOFt9OxOntDaOBzq4OZoWRjJjqTofNIA=="],
 
     "@lingui/babel-plugin-lingui-macro": ["@lingui/babel-plugin-lingui-macro@6.12.0", "", { "dependencies": { "@lingui/conf": "6.12.0", "@lingui/message-utils": "6.12.0" }, "peerDependencies": { "@babel/core": "^7.20.12 || ^8.0.0" }, "optionalPeers": ["@babel/core"] }, "sha512-hG7KVmE8loEOJwDQyjheJzrtpxKbvFFJ+wQ5k0N7dO9ED03mRG0HO2XCjZUsB+UZEu0CUn/k3yrwJAQ8/4/dEQ=="],
 
