@@ -3,8 +3,24 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
+import {
+  type CanonicalRoofSegment,
+  type SceneNodeLike as KernelSceneNodeLike,
+  distancePointToSegment2D,
+  evaluateRoofSegmentSurfaceY,
+  extractBeamPrism,
+  extractCanonicalRoofSegments,
+  extractColumnPrism,
+  resolveMepRunExtents as kernelResolveMepRunExtents,
+  segmentIntersectsOrientedPrismY,
+} from '@kruschdev/pascal-mep-kernel'
 import { deriveRequiredFirestops, isApprovedFirestopMaterial } from './fireblocking'
 import { traceStructuralLoadPaths } from './load-path'
+import {
+  IRC_ROOF_ENVELOPE_THRESHOLDS,
+  IRC_WIND_SEISMIC_THRESHOLDS,
+  getIrcRuleById,
+} from './rules'
 import { checkBeamEntry, checkColumnEntry, resolveBeamCatalogEntry } from './sizing'
 import {
   type BeamMaterialFamily,
@@ -24,10 +40,8 @@ import {
   findLevelCommercialRtus,
   getConnectorBySku,
   isHighestWalledLevelInBuilding,
-  isLowestWalledLevelInBuilding,
   resolveNodeLevelId,
   sameLevelOrUnscoped,
-  shouldAdoptRoofSegmentOntoLevel,
 } from './tables'
 
 export type AuditSeverity = 'error' | 'warning' | 'info'
@@ -62,119 +76,19 @@ export type MepRunExtents = {
   halfY: number
 }
 
-const PLUMBING_PIPE_HALF_OD_M: Readonly<Record<string, number>> = {
-  '1/2': 0.008,
-  '3/4': 0.011,
-  '1': 0.015,
-  '1-1/4': 0.021,
-  '1-1/2': 0.024,
-  '2': 0.030,
-  '2-1/2': 0.0365,
-  '3': 0.044,
-  '4': 0.057,
-  '6': 0.084,
-}
-
-const ELECTRICAL_CONDUIT_HALF_OD_M: Readonly<Record<string, number>> = {
-  '1/2': 0.011,
-  '3/4': 0.013,
-  '1': 0.017,
-  '1-1/4': 0.021,
-  '1-1/2': 0.024,
-  '2': 0.030,
-  '2-1/2': 0.036,
-  '3': 0.044,
-  '4': 0.057,
-}
-
-function normalizeNominalInchKey(raw: unknown): string | null {
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return String(raw)
-  if (typeof raw !== 'string') return null
-  const cleaned = raw.trim().replace(/["'″\s]+/g, '')
-  return cleaned.length > 0 ? cleaned : null
-}
-
-function parseNominalInches(key: string): number | null {
-  const mixed = /^(\d+)-(\d+)\/(\d+)$/.exec(key)
-  if (mixed) {
-    const den = Number(mixed[3])
-    if (den > 0) return Number(mixed[1]) + Number(mixed[2]) / den
-  }
-  const frac = /^(\d+)\/(\d+)$/.exec(key)
-  if (frac) {
-    const den = Number(frac[2])
-    if (den > 0) return Number(frac[1]) / den
-  }
-  const num = Number(key)
-  return Number.isFinite(num) && num > 0 ? num : null
-}
-
 /**
  * Resolve real physical half-extents (`halfXZ`, `halfY` in meters) for HVAC ducts,
  * plumbing pipes, and electrical conduits so structural beam/column clash checks catch
  * large ducts (e.g., 14"x8") and 3"/4" DWV stacks without over-inflating 1/2" PEX/EMT.
  */
 export function resolveMepRunExtents(run: SceneNodeLike): MepRunExtents {
-  if (run.type === 'hvac:duct-run') {
-    if (run.shape === 'rectangular') {
-      const widthIn =
-        typeof run.width === 'number' && Number.isFinite(run.width) && run.width > 0 ? run.width : 10
-      const heightIn =
-        typeof run.height === 'number' && Number.isFinite(run.height) && run.height > 0 ? run.height : 8
-      return {
-        halfXZ: Math.max(0.025, (widthIn * INCHES_TO_METERS) / 2),
-        halfY: Math.max(0.025, (heightIn * INCHES_TO_METERS) / 2),
-      }
-    }
-    const diaIn =
-      typeof run.diameter === 'number' && Number.isFinite(run.diameter) && run.diameter > 0
-        ? run.diameter
-        : typeof run.width === 'number' && Number.isFinite(run.width) && run.width > 0
-          ? run.width
-          : 6
-    const r = Math.max(0.015, (diaIn * INCHES_TO_METERS) / 2)
-    return { halfXZ: r, halfY: r }
-  }
-
-  if (run.type === 'plumbing:pipe-run') {
-    const key = normalizeNominalInchKey(run.nominalSize ?? run.diameter)
-    if (key) {
-      if (key in PLUMBING_PIPE_HALF_OD_M) {
-        const r = PLUMBING_PIPE_HALF_OD_M[key]!
-        return { halfXZ: r, halfY: r }
-      }
-      const inches = parseNominalInches(key)
-      if (inches !== null) {
-        const r = Math.max(0.008, (inches * 1.12 * INCHES_TO_METERS) / 2)
-        return { halfXZ: r, halfY: r }
-      }
-    }
-    return { halfXZ: 0.025, halfY: 0.025 }
-  }
-
-  if (run.type === 'electrical:conduit-run') {
-    const key = normalizeNominalInchKey(run.tradeSize)
-    if (key) {
-      if (key in ELECTRICAL_CONDUIT_HALF_OD_M) {
-        const r = ELECTRICAL_CONDUIT_HALF_OD_M[key]!
-        return { halfXZ: r, halfY: r }
-      }
-      const inches = parseNominalInches(key)
-      if (inches !== null) {
-        const r = Math.max(0.011, (inches * 1.12 * INCHES_TO_METERS) / 2)
-        return { halfXZ: r, halfY: r }
-      }
-    }
-    return { halfXZ: 0.014, halfY: 0.014 }
-  }
-
-  return { halfXZ: 0.025, halfY: 0.025 }
+  return kernelResolveMepRunExtents(run as KernelSceneNodeLike)
 }
 
 /**
  * True 3D segment vs. Oriented Bounding Box (OBB) intersection for angled/diagonal beams.
- * Transforms segment `a -> b` into beam-local `(u along beam, y vertical, n transverse)` space
- * and applies the exact Kay-Kajiya slab clipping test (eliminating diagonal AABB false positives).
+ * Delegates to `@kruschdev/pascal-mep-kernel`'s `extractBeamPrism` + `segmentIntersectsOrientedPrismY`
+ * so structural audit and cross-trade occupancy/routing share 100% identical OBB geometry.
  */
 export function segmentIntersectsBeam(
   a: Vec3,
@@ -186,52 +100,26 @@ export function segmentIntersectsBeam(
   beamDepthM: number,
   mepExtents: number | MepRunExtents = 0.025,
 ): boolean {
+  if (beamWidthM <= 0 || beamDepthM <= 0) return false
+  const prism = extractBeamPrism({
+    id: '__beam__',
+    type: 'structural:beam',
+    start: beamStart,
+    end: beamEnd,
+    elevationY: beamY,
+    widthIn: beamWidthM / INCHES_TO_METERS,
+    depthIn: beamDepthM / INCHES_TO_METERS,
+  })
+  if (!prism) return false
   const halfXZ = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfXZ
   const halfY = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfY
-  const bdx = beamEnd[0] - beamStart[0]
-  const bdz = beamEnd[1] - beamStart[1]
-  const beamLen = Math.hypot(bdx, bdz)
-  if (beamLen < 1e-4) return false
-  const ux = bdx / beamLen
-  const uz = bdz / beamLen
-  const nx = -uz
-  const nz = ux
-
-  const toLocal = (p: Vec3): [number, number, number] => {
-    const rx = p[0] - beamStart[0]
-    const rz = p[2] - beamStart[1]
-    return [rx * ux + rz * uz, p[1] - beamY, rx * nx + rz * nz]
-  }
-
-  const la = toLocal(a)
-  const lb = toLocal(b)
-  const minB: [number, number, number] = [-halfXZ, -beamDepthM / 2 - halfY, -beamWidthM / 2 - halfXZ]
-  const maxB: [number, number, number] = [beamLen + halfXZ, beamDepthM / 2 + halfY, beamWidthM / 2 + halfXZ]
-
-  let tMin = 0
-  let tMax = 1
-  for (let axis = 0; axis < 3; axis++) {
-    const o = la[axis]!
-    const d = lb[axis]! - o
-    const lo = minB[axis]!
-    const hi = maxB[axis]!
-    if (Math.abs(d) < 1e-9) {
-      if (o < lo || o > hi) return false
-    } else {
-      let t1 = (lo - o) / d
-      let t2 = (hi - o) / d
-      if (t1 > t2) [t1, t2] = [t2, t1]
-      tMin = Math.max(tMin, t1)
-      tMax = Math.min(tMax, t2)
-      if (tMin > tMax) return false
-    }
-  }
-  return tMax >= 0 && tMin <= 1
+  return segmentIntersectsOrientedPrismY(a, b, prism, [halfXZ, halfY, halfXZ])
 }
 
 /**
  * True 3D segment vs. structural column box (OBB honoring `rotationY` around Y).
- * Column local shaft spans `X: [-widthM/2, +widthM/2]`, `Y: [0, heightM]`, `Z: [-depthM/2, +depthM/2]`.
+ * Delegates to `@kruschdev/pascal-mep-kernel`'s `extractColumnPrism` + `segmentIntersectsOrientedPrismY`
+ * so column clash geometry matches cross-trade occupancy extraction 1:1.
  */
 export function segmentIntersectsColumn(
   a: Vec3,
@@ -244,41 +132,19 @@ export function segmentIntersectsColumn(
   mepExtents: number | MepRunExtents = 0.025,
 ): boolean {
   if (heightM <= 1e-4 || widthM <= 1e-4 || depthM <= 1e-4) return false
+  const prism = extractColumnPrism({
+    id: '__column__',
+    type: 'structural:column',
+    position: colPos,
+    widthIn: widthM / INCHES_TO_METERS,
+    depthIn: depthM / INCHES_TO_METERS,
+    heightM,
+    rotation: rotationY,
+  })
+  if (!prism) return false
   const halfXZ = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfXZ
   const halfY = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfY
-  const cos = Math.cos(rotationY)
-  const sin = Math.sin(rotationY)
-  // Inverse of Three.js Ry(rot): localX = dx*cos - dz*sin, localZ = dx*sin + dz*cos
-  const toLocal = (p: Vec3): [number, number, number] => {
-    const dx = p[0] - colPos[0]
-    const dy = p[1] - colPos[1]
-    const dz = p[2] - colPos[2]
-    return [dx * cos - dz * sin, dy, dx * sin + dz * cos]
-  }
-  const la = toLocal(a)
-  const lb = toLocal(b)
-  const minB: [number, number, number] = [-widthM / 2 - halfXZ, -halfY, -depthM / 2 - halfXZ]
-  const maxB: [number, number, number] = [widthM / 2 + halfXZ, heightM + halfY, depthM / 2 + halfXZ]
-
-  let tMin = 0
-  let tMax = 1
-  for (let axis = 0; axis < 3; axis++) {
-    const o = la[axis]!
-    const d = lb[axis]! - o
-    const lo = minB[axis]!
-    const hi = maxB[axis]!
-    if (Math.abs(d) < 1e-9) {
-      if (o < lo || o > hi) return false
-    } else {
-      let t1 = (lo - o) / d
-      let t2 = (hi - o) / d
-      if (t1 > t2) [t1, t2] = [t2, t1]
-      tMin = Math.max(tMin, t1)
-      tMax = Math.min(tMax, t2)
-      if (tMin > tMax) return false
-    }
-  }
-  return tMax >= 0 && tMin <= 1
+  return segmentIntersectsOrientedPrismY(a, b, prism, [halfXZ, halfY, halfXZ])
 }
 
 export function auditStructuralScene(
@@ -365,7 +231,7 @@ export function auditStructuralScene(
     }
 
     const actualBearingIn = typeof beam.bearingLengthIn === 'number' ? beam.bearingLengthIn : 1.5
-    if (actualBearingIn < check.requiredBearingIn - 0.05) {
+    if (actualBearingIn < check.requiredBearingIn - IRC_WIND_SEISMIC_THRESHOLDS.minBearingToleranceIn) {
       push({
         severity: 'error',
         category: 'beam-sizing',
@@ -536,22 +402,6 @@ export function auditStructuralScene(
     ((s?.[1] ?? 0) + (e?.[1] ?? 0)) / 2,
   ]
 
-  const pointToSegmentDist2D = (
-    px: number,
-    pz: number,
-    ax: number,
-    az: number,
-    bx: number,
-    bz: number,
-  ): number => {
-    const dx = bx - ax
-    const dz = bz - az
-    const lenSq = dx * dx + dz * dz
-    if (lenSq < 1e-10) return Math.hypot(px - ax, pz - az)
-    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / lenSq))
-    return Math.hypot(px - (ax + t * dx), pz - (az + t * dz))
-  }
-
   for (const { lvlId, scopeNodes } of auditPasses) {
     const lvlAsm = lvlId
       ? assemblies.find((a) => resolveNodeLevelId(nodes, a) === lvlId)
@@ -614,7 +464,7 @@ export function auditStructuralScene(
         if (req.hostWallId && fs.hostWallId) return fs.hostWallId === req.hostWallId
         const fsStart = (fs.start as Vec2 | undefined) ?? [0, 0]
         const fsEnd = (fs.end as Vec2 | undefined) ?? fsStart
-        const distToSeg = pointToSegmentDist2D(reqMid[0], reqMid[1], fsStart[0], fsStart[1], fsEnd[0], fsEnd[1])
+        const distToSeg = distancePointToSegment2D(reqMid[0], reqMid[1], fsStart[0], fsStart[1], fsEnd[0], fsEnd[1])
         if (req.penetratingNodeId && fs.penetratingNodeId) {
           return fs.penetratingNodeId === req.penetratingNodeId && distToSeg <= 1.25
         }
@@ -677,55 +527,78 @@ export function auditStructuralScene(
   }
 
   // 6. Priority #1 Structural Right-of-Way: detect MEP runs boring through structural beams & columns (strictly per level)!
+  const mepRightOfWayRule = getIrcRuleById('irc-r502-8-mep-right-of-way')
+  const beamPrisms = beams.map((beam) => ({
+    beam,
+    levelId: resolveNodeLevelId(nodes, beam),
+    prism:
+      (typeof beam.widthIn === 'number' && beam.widthIn <= 0) ||
+      (typeof beam.depthIn === 'number' && beam.depthIn <= 0)
+        ? null
+        : extractBeamPrism({
+            ...(beam as KernelSceneNodeLike),
+            start: (beam.start as Vec2 | undefined) ?? [0, 0],
+            end: (beam.end as Vec2 | undefined) ?? [1, 0],
+            elevationY: typeof beam.elevationY === 'number' ? beam.elevationY : 2.4,
+            widthIn: typeof beam.widthIn === 'number' ? beam.widthIn : 3.5,
+            depthIn: typeof beam.depthIn === 'number' ? beam.depthIn : 11.875,
+          }),
+  }))
+  const columnPrisms = columns.map((col) => {
+    const wM = (typeof col.widthIn === 'number' ? col.widthIn : 5.5) * INCHES_TO_METERS
+    const dM = (typeof col.depthIn === 'number' ? col.depthIn : 5.5) * INCHES_TO_METERS
+    const hM = typeof col.heightM === 'number' ? col.heightM : 2.7432
+    return {
+      col,
+      levelId: resolveNodeLevelId(nodes, col),
+      prism:
+        hM <= 1e-4 || wM <= 1e-4 || dM <= 1e-4
+          ? null
+          : extractColumnPrism({
+              ...(col as KernelSceneNodeLike),
+              position: (col.position as Vec3 | undefined) ?? [0, 0, 0],
+              widthIn: wM / INCHES_TO_METERS,
+              depthIn: dM / INCHES_TO_METERS,
+              heightM: hM,
+            }),
+    }
+  })
+
   const reportedClashes = new Set<string>()
   for (const run of mepRuns) {
     const runLvl = resolveNodeLevelId(nodes, run)
     const mepExtents = resolveMepRunExtents(run)
+    const pad: Vec3 = [mepExtents.halfXZ, mepExtents.halfY, mepExtents.halfXZ]
     const path = run.path as ReadonlyArray<Vec3>
     for (let i = 1; i < path.length; i++) {
       const a = path[i - 1]!
       const b = path[i]!
-      for (const beam of beams) {
-        if (!sameLevelOrUnscoped(runLvl, resolveNodeLevelId(nodes, beam))) continue
+      for (const { beam, levelId: beamLvl, prism } of beamPrisms) {
+        if (!prism || !sameLevelOrUnscoped(runLvl, beamLvl)) continue
         const clashKey = `${run.id}::${beam.id}`
         if (reportedClashes.has(clashKey)) continue
-        const start = (beam.start as Vec2 | undefined) ?? [0, 0]
-        const end = (beam.end as Vec2 | undefined) ?? [1, 0]
-        const beamY = typeof beam.elevationY === 'number' ? beam.elevationY : 2.4
-        const wM = (typeof beam.widthIn === 'number' ? beam.widthIn : 3.5) * INCHES_TO_METERS
-        const dM = (typeof beam.depthIn === 'number' ? beam.depthIn : 11.875) * INCHES_TO_METERS
-        if (segmentIntersectsBeam(a, b, start, end, beamY, wM, dM, mepExtents)) {
+        if (segmentIntersectsOrientedPrismY(a, b, prism, pad)) {
           reportedClashes.add(clashKey)
           push({
             severity: 'error',
             category: 'mep-clash',
-            codeRef: 'IRC R502.8 / Priority #1 Structural Right-of-Way',
+            codeRef: mepRightOfWayRule.codeRef,
             nodeId: beam.id,
             message: `MEP run "${run.id}" (${run.type}) penetrates structural beam "${beam.name ?? beam.id}" (${beam.designation ?? beam.beamType}); boring engineered beams or headers is prohibited.`,
             remediation: `Re-route ${run.type} below the beam soffit or through an adjacent open joist/TJI knockout bay.`,
           })
         }
       }
-      for (const col of columns) {
-        if (!sameLevelOrUnscoped(runLvl, resolveNodeLevelId(nodes, col))) continue
+      for (const { col, levelId: colLvl, prism } of columnPrisms) {
+        if (!prism || !sameLevelOrUnscoped(runLvl, colLvl)) continue
         const clashKey = `${run.id}::${col.id}`
         if (reportedClashes.has(clashKey)) continue
-        const colPos = (col.position as Vec3 | undefined) ?? [0, 0, 0]
-        const wM = (typeof col.widthIn === 'number' ? col.widthIn : 5.5) * INCHES_TO_METERS
-        const dM = (typeof col.depthIn === 'number' ? col.depthIn : 5.5) * INCHES_TO_METERS
-        const hM = typeof col.heightM === 'number' ? col.heightM : 2.7432
-        const rotY =
-          typeof col.rotation === 'number'
-            ? col.rotation
-            : Array.isArray(col.rotation) && typeof col.rotation[1] === 'number'
-              ? col.rotation[1]
-              : 0
-        if (segmentIntersectsColumn(a, b, colPos, wM, dM, hM, rotY, mepExtents)) {
+        if (segmentIntersectsOrientedPrismY(a, b, prism, pad)) {
           reportedClashes.add(clashKey)
           push({
             severity: 'error',
             category: 'mep-clash',
-            codeRef: 'IRC R502.8 / Priority #1 Structural Right-of-Way',
+            codeRef: mepRightOfWayRule.codeRef,
             nodeId: col.id,
             message: `MEP run "${run.id}" (${run.type}) penetrates structural column "${col.name ?? col.id}" (${col.designation ?? col.columnType}); piercing load-bearing columns is prohibited.`,
             remediation: `Re-route ${run.type} horizontally around the structural column shaft with >= 1 in clearance.`,
@@ -736,6 +609,7 @@ export function auditStructuralScene(
   }
 
   // 7. Roof-rafter-plane & exterior-envelope MEP intrusion diagnostics (VIS-07)
+  const roofEnvelopeRule = getIrcRuleById('irc-r802-roof-framing-envelope')
   const OUTDOOR_OR_ROOF_EQUIP_RE =
     /condenser|heat-pump-outdoor|mini-split-outdoor|rooftop-package|\brtu\b|gas-meter|hose[- ]?bibb|well|outdoor/i
   const EXTERIOR_MEP_RUN_RE =
@@ -743,106 +617,10 @@ export function auditStructuralScene(
   const isMainDwvVentStack = (n: SceneNodeLike): boolean =>
     Boolean(n.isMainVentStack) || /Main DWV Soil & Vent Stack|Through Roof/i.test(String(n.name ?? ''))
 
-  type AuditRoofSeg = {
-    cx: number
-    cy: number
-    cz: number
-    yaw: number
-    roofType: string
-    widthM: number
-    depthM: number
-    pitchRad: number
-    overhangM: number
-  }
-
-  const extractAuditRoofSegsForLevel = (
-    targetLvlId: string | null,
-    wallH: number,
-    baseY: number,
-  ): AuditRoofSeg[] => {
-    const segs: AuditRoofSeg[] = []
-    const isUpperLevel = !isLowestWalledLevelInBuilding(nodes, targetLvlId)
-
-    for (const node of all) {
-      if (node.type !== 'roof-segment') continue
-      const segPos = Array.isArray(node.position) ? (node.position as number[]) : [0, 0, 0]
-      let px = typeof segPos[0] === 'number' ? segPos[0] : 0
-      let py = typeof segPos[1] === 'number' ? segPos[1] : 0
-      let pz = typeof segPos[2] === 'number' ? segPos[2] : 0
-      let yaw = typeof node.rotation === 'number' ? node.rotation : 0
-
-      const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
-      const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
-
-      let curParentId = typeof node.parentId === 'string' ? node.parentId : null
-      let belongsHere = !targetLvlId
-      let wasAdoptedFromWallLessLevel = false
-      for (let hop = 0; hop < 6 && curParentId; hop++) {
-        if (!targetLvlId || curParentId === targetLvlId) {
-          belongsHere = true
-          break
-        }
-        const parent = nodes[curParentId]
-        if (!parent) break
-        if (parent.type === 'level') {
-          const absCos = Math.abs(Math.cos(yaw))
-          const absSin = Math.abs(Math.sin(yaw))
-          const halfX = (widthM * absCos + depthM * absSin) / 2
-          const halfZ = (widthM * absSin + depthM * absCos) / 2
-          belongsHere = shouldAdoptRoofSegmentOntoLevel(nodes, targetLvlId, parent, px, pz, halfX, halfZ)
-          wasAdoptedFromWallLessLevel = belongsHere
-          break
-        }
-        if (parent.type === 'roof') {
-          const rot = typeof parent.rotation === 'number' ? parent.rotation : 0
-          const rp = Array.isArray(parent.position) ? (parent.position as number[]) : [0, 0, 0]
-          const cos = Math.cos(rot)
-          const sin = Math.sin(rot)
-          const nx = px * cos + pz * sin
-          const nz = -px * sin + pz * cos
-          px = nx + (typeof rp[0] === 'number' ? rp[0] : 0)
-          py += typeof rp[1] === 'number' ? rp[1] : 0
-          pz = nz + (typeof rp[2] === 'number' ? rp[2] : 0)
-          yaw += rot
-        }
-        curParentId = typeof parent.parentId === 'string' ? parent.parentId : null
-      }
-      if (!belongsHere) continue
-
-      const rawPitch = typeof node.pitch === 'number' && Number.isFinite(node.pitch) ? node.pitch : 26.57
-      const pitchRad =
-        rawPitch <= 0
-          ? 0
-          : rawPitch > 1.4
-            ? (Math.min(65, rawPitch) * Math.PI) / 180
-            : Math.min((65 * Math.PI) / 180, rawPitch)
-      const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
-      const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
-      const cy =
-        py > 0.05
-          ? py + segWallH
-          : !wasAdoptedFromWallLessLevel && isUpperLevel
-            ? baseY + segWallH
-            : baseY + wallH + segWallH
-      segs.push({
-        cx: px,
-        cy,
-        cz: pz,
-        yaw,
-        roofType: typeof node.roofType === 'string' ? node.roofType : 'gable',
-        widthM,
-        depthM,
-        pitchRad,
-        overhangM,
-      })
-    }
-    return segs
-  }
-
   const evalAuditRoofSurfaceY = (
     x: number,
     z: number,
-    roofSegs: readonly AuditRoofSeg[],
+    roofSegs: readonly CanonicalRoofSegment[],
     bounds: { minX: number; maxX: number; minZ: number; maxZ: number },
     baseY: number,
     wallH: number,
@@ -855,57 +633,11 @@ export function auditStructuralScene(
     if (roofSegs.length > 0) {
       let bestY: number | null = null
       for (const seg of roofSegs) {
-        const swapAxes =
-          (seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard') &&
-          seg.widthM < seg.depthM
-        const effYaw = swapAxes ? seg.yaw + Math.PI / 2 : seg.yaw
-        const effW = swapAxes ? seg.depthM : seg.widthM
-        const effD = swapAxes ? seg.widthM : seg.depthM
-        const cosR = Math.cos(effYaw)
-        const sinR = Math.sin(effYaw)
-        const dx = x - seg.cx
-        const dz = z - seg.cz
-        const lx = dx * cosR - dz * sinR
-        const lz = dx * sinR + dz * cosR
-        const slopeTan = Math.tan(seg.pitchRad)
-
-        let sy: number
-        if (seg.roofType === 'conical') {
-          const r = Math.min(seg.widthM, seg.depthM) / 2
-          const dist = Math.hypot(lx, lz)
-          if (dist > r + seg.overhangM + 0.15) continue
-          sy = seg.cy + Math.max(0, r - dist) * slopeTan
-        } else {
-          const padX =
-            seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard'
-              ? seg.overhangM + 0.15
-              : 0.15
-          if (Math.abs(lx) > effW / 2 + padX || Math.abs(lz) > effD / 2 + seg.overhangM + 0.15) {
-            continue
-          }
-          if (seg.roofType === 'flat' || seg.pitchRad <= 1e-4) {
-            sy = seg.cy
-          } else if (seg.roofType === 'shed') {
-            sy = seg.cy + Math.max(0, effD / 2 - lz) * slopeTan
-          } else if (seg.roofType === 'hip' || seg.roofType === 'dutch') {
-            const halfW = effW / 2
-            const halfD = effD / 2
-            const riseM = seg.roofType === 'dutch' ? Math.min(halfD * slopeTan, halfD * 1.35) : halfD * slopeTan
-            const effTan = riseM / Math.max(0.1, halfD)
-            const dMin = Math.min(halfW - Math.abs(lx), halfD - Math.abs(lz))
-            sy = seg.cy + Math.min(riseM, Math.max(0, dMin) * effTan)
-          } else if (seg.roofType === 'mansard') {
-            const halfW = effW / 2
-            const halfD = effD / 2
-            const inset = Math.min(effW, effD) * 0.18
-            const riseM = Math.min(2.2, Math.max(0.25, inset * slopeTan))
-            const dMin = Math.min(halfW - Math.abs(lx), halfD - Math.abs(lz))
-            sy = seg.cy + Math.min(riseM, Math.max(0, dMin) * (riseM / Math.max(0.1, inset)))
-          } else {
-            sy = seg.cy + Math.max(0, effD / 2 - Math.abs(lz)) * slopeTan
-          }
-        }
-        if (bestY === null || sy > bestY) bestY = sy
+        const sy = evaluateRoofSegmentSurfaceY(seg, x, z, {
+          clampOverhangToEave: true,
+          footprintPadM: 0.15,
+        })
+        if (sy !== null && (bestY === null || sy > bestY)) bestY = sy
       }
       if (bestY !== null) return bestY
     }
@@ -963,8 +695,13 @@ export function auditStructuralScene(
       typeof lvlAsm?.roofPitchRise === 'number' && Number.isFinite(lvlAsm.roofPitchRise)
         ? lvlAsm.roofPitchRise
         : 6
-    const levelRoofSegs = isTopWalledLevel
-      ? extractAuditRoofSegsForLevel(lvlId, wallH, baseY).filter((seg) => seg.cy >= baseY + wallH - 0.6)
+    const levelRoofSegs: CanonicalRoofSegment[] = isTopWalledLevel
+      ? extractCanonicalRoofSegments(
+          nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+          lvlId,
+          wallH,
+          { includeHidden: true, levelBaseY: baseY },
+        ).filter((seg) => seg.eaveY >= baseY + wallH - 0.6)
       : []
     const hasCommercialRtu = findLevelCommercialRtus(nodes, lvlId).length > 0
     const isFlatCommercialRoof = hasCommercialRtu && levelRoofSegs.length === 0
@@ -999,7 +736,7 @@ export function auditStructuralScene(
           pos[2] >= bounds.minZ - 0.15 &&
           pos[2] <= bounds.maxZ + 0.15
 
-        if (isTopWalledLevel && insideBounds && topY > baseY + wallH + 0.05) {
+        if (isTopWalledLevel && insideBounds && topY > baseY + wallH + IRC_ROOF_ENVELOPE_THRESHOLDS.atticThresholdOffsetM) {
           const roofY = evalAuditRoofSurfaceY(
             pos[0],
             pos[2],
@@ -1011,11 +748,11 @@ export function auditStructuralScene(
             isFlatCommercialRoof,
           )
           const excess = topY - roofY
-          if (excess > 0.08) {
+          if (excess > IRC_ROOF_ENVELOPE_THRESHOLDS.warningProtrusionM) {
             push({
-              severity: excess > 0.15 ? 'error' : 'warning',
+              severity: excess > IRC_ROOF_ENVELOPE_THRESHOLDS.errorProtrusionM ? 'error' : 'warning',
               category: 'mep-clash',
-              codeRef: 'IRC R802 / Roof Framing Envelope',
+              codeRef: roofEnvelopeRule.codeRef,
               nodeId: n.id,
               message: `Indoor MEP equipment "${n.name ?? n.id}" (${t}) top (${topY.toFixed(2)}m) protrudes +${excess.toFixed(2)}m above the roof framing plane (${roofY.toFixed(2)}m).`,
               remediation:
@@ -1030,9 +767,9 @@ export function auditStructuralScene(
           bounds.minZ - pos[2],
           pos[2] - bounds.maxZ,
         )
-        if (extOverhang > 0.15) {
+        if (extOverhang > IRC_ROOF_ENVELOPE_THRESHOLDS.equipmentExteriorWarningM) {
           push({
-            severity: extOverhang > 0.6 ? 'error' : 'warning',
+            severity: extOverhang > IRC_ROOF_ENVELOPE_THRESHOLDS.equipmentExteriorErrorM ? 'error' : 'warning',
             category: 'mep-clash',
             codeRef: 'IRC R802 / Building Framing Envelope',
             nodeId: n.id,
@@ -1071,7 +808,7 @@ export function auditStructuralScene(
                 px <= bounds.maxX + 0.1 &&
                 pz >= bounds.minZ - 0.1 &&
                 pz <= bounds.maxZ + 0.1
-              if (!insideXZ || py + halfY <= baseY + wallH + 0.05) continue
+              if (!insideXZ || py + halfY <= baseY + wallH + IRC_ROOF_ENVELOPE_THRESHOLDS.atticThresholdOffsetM) continue
               const roofY = evalAuditRoofSurfaceY(
                 px,
                 pz,
@@ -1083,12 +820,12 @@ export function auditStructuralScene(
                 isFlatCommercialRoof,
               )
               const excess = py + halfY - roofY
-              if (excess > 0.08) {
+              if (excess > IRC_ROOF_ENVELOPE_THRESHOLDS.warningProtrusionM) {
                 roofHitLogged = true
                 push({
-                  severity: excess > 0.15 ? 'error' : 'warning',
+                  severity: excess > IRC_ROOF_ENVELOPE_THRESHOLDS.errorProtrusionM ? 'error' : 'warning',
                   category: 'mep-clash',
-                  codeRef: 'IRC R802 / Roof Framing Envelope',
+                  codeRef: roofEnvelopeRule.codeRef,
                   nodeId: n.id,
                   message: `MEP run "${n.name ?? n.id}" (${t}) top (${(py + halfY).toFixed(2)}m) protrudes +${excess.toFixed(2)}m above the roof framing plane (${roofY.toFixed(2)}m) at (${px.toFixed(2)}, ${pz.toFixed(2)}).`,
                   remediation:
@@ -1107,7 +844,7 @@ export function auditStructuralScene(
                 bounds.minZ - pt[2],
                 pt[2] - bounds.maxZ,
               )
-              if (overhang > 0.35) {
+              if (overhang > IRC_ROOF_ENVELOPE_THRESHOLDS.runExteriorWarningM) {
                 extHitLogged = true
                 push({
                   severity: 'warning',

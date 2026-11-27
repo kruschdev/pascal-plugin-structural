@@ -4,6 +4,7 @@
  */
 
 export * from './tables'
+export * from './rules'
 export * from './openings'
 export * from './sizing'
 export * from './fireblocking'

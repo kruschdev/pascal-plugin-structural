@@ -7,9 +7,11 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
+import { evaluatePlacementCandidate } from '@kruschdev/pascal-mep-kernel'
 import { deriveRequiredFirestops } from './fireblocking'
 import { evaluateBracedWallLines } from './load-path'
 import { clusterLevelFootprints, extractWallOpenings, resolveWallHeightM } from './openings'
+import { getIrcRuleById, isHighSeismicCategory } from './rules'
 import {
   selectBeamHangerSku,
   selectHurricaneTieSku,
@@ -288,7 +290,7 @@ export function autopopulateStructuralScene(
       isLoadBearing: isExterior,
       isShearWall: isShear,
       isWetWall: isWet,
-      sheathingEdgeNailIn: isShear ? (design.seismicCategory.startsWith('D') ? 3 : 4) : 6,
+      sheathingEdgeNailIn: isShear ? (isHighSeismicCategory(design.seismicCategory) ? 3 : 4) : 6,
     }
   }
 
@@ -908,14 +910,32 @@ export function autopopulateStructuralScene(
   }
 
   // 7. Lateral Bracing, High-Wind Uplift Straps & Seismic Hold-Downs / Plate Washers
-  const highWind = design.windMph >= 130
-  const highSeismic =
-    design.seismicCategory === 'D0' ||
-    design.seismicCategory === 'D1' ||
-    design.seismicCategory === 'D2'
+  // Read wind/seismic thresholds directly from the single-source IRC declarative rule table
+  const windSeismicRule = getIrcRuleById('irc-r802-11-wind-seismic-uplift')
+  const highWind = !evaluatePlacementCandidate(
+    [windSeismicRule],
+    {
+      kind: 'structural:assembly',
+      pos: [minX, levelBaseY, minZ],
+      designWindMph: design.windMph,
+      hasStrap: false,
+    },
+    'placement',
+  ).legal
+  const highSeismic = isHighSeismicCategory(design.seismicCategory)
+  const needsHeavyStrap = !evaluatePlacementCandidate(
+    [windSeismicRule],
+    {
+      kind: 'structural:assembly',
+      pos: [minX, levelBaseY, minZ],
+      designWindMph: design.windMph,
+      hasHeavyStrap: false,
+    },
+    'placement',
+  ).legal
 
   if (highWind || design.storiesAbove >= 1) {
-    const strapSku = design.windMph >= 140 ? 'MSTC40' : 'MSTA36'
+    const strapSku = needsHeavyStrap ? 'MSTC40' : 'MSTA36'
     const strapQty = Math.max(8, Math.ceil(((footprintWidthFt + footprintDepthFt) * 2) / 12))
     emitConnector({
       sku: strapSku,
@@ -988,7 +1008,17 @@ export function autopopulateStructuralScene(
     }
   }
 
-  if (includeFoundation && (highSeismic || design.seismicCategory === 'C')) {
+  const needsSillBolts = !evaluatePlacementCandidate(
+    [windSeismicRule],
+    {
+      kind: 'structural:assembly',
+      pos: [(minX + maxX) / 2, levelBaseY, minZ],
+      seismicDesignCategory: design.seismicCategory,
+      hasSillBolt: false,
+    },
+    'placement',
+  ).legal
+  if (includeFoundation && needsSillBolts) {
     const perimFt = totalPerimFt > 0 ? totalPerimFt : (footprintWidthFt + footprintDepthFt) * 2
     const boltSpacingFt = design.storiesAbove >= 2 || highSeismic ? 4 : 6
     const boltQty = Math.max(8, Math.ceil(perimFt / boltSpacingFt) + 4)

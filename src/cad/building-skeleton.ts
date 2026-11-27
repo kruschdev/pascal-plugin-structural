@@ -21,6 +21,21 @@
  */
 
 import {
+  type CanonicalRoofSegment,
+  type CanonicalWall,
+  type SceneNodeLike as KernelSceneNodeLike,
+  type RoofSegmentKind,
+  clipSegmentToPolygon2D,
+  distancePointToSegment2D,
+  evaluateRoofSegmentSurfaceY,
+  extractCanonicalRoofSegments,
+  findImmediateLowerWalledLevel as kernelFindImmediateLowerWalledLevel,
+  isOutdoorOrUnwalledSlab as kernelIsOutdoorOrUnwalledSlab,
+  isPointEnclosedByWalls,
+  pointInPolygon2D,
+  polygonBounds2D,
+} from '@kruschdev/pascal-mep-kernel'
+import {
   BoxGeometry,
   Euler,
   Group,
@@ -44,7 +59,6 @@ import {
   isLowestWalledLevelInBuilding,
   levelSortOrder,
   segmentIntersectsAabb2D,
-  shouldAdoptRoofSegmentOntoLevel,
 } from '../irc/tables'
 
 type BucketId =
@@ -175,6 +189,8 @@ type ExtractedRoofSegment = {
   isFallback?: boolean
   /** Optional XZ enclosed-footprint predicate for fallback synthesized roofs (VIS-02 / VIS-V3-06). */
   footprintClip?: (x: number, z: number, marginM?: number) => boolean
+  /** Underlying canonical segment from `@kruschdev/pascal-mep-kernel` for exact surface queries. */
+  canonical?: CanonicalRoofSegment
 }
 
 type CanonicalRoofFrame = {
@@ -275,153 +291,31 @@ type Vec3Tuple = [number, number, number]
 const OUTDOOR_SLAB_RE =
   /\b(pool|swimming|piscine|patio|deck|porch|terrace|balcony|yard|garden|lanai|courtyard|driveway|walkway|sidewalk|step|steps|stair|stairs|landing|apron|stoop|exterior|outdoor|lawn|plaza|paving)\b/i
 
-type WallSeg2D = { ax: number; az: number; bx: number; bz: number; len: number }
-
-function pointToSegmentDist2D(px: number, pz: number, ax: number, az: number, bx: number, bz: number): number {
-  const dx = bx - ax
-  const dz = bz - az
-  const lenSq = dx * dx + dz * dz
-  if (lenSq < 1e-10) return Math.hypot(px - ax, pz - az)
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / lenSq))
-  return Math.hypot(px - (ax + t * dx), pz - (az + t * dz))
-}
-
-function pointInPolygon2D(px: number, pz: number, poly: ReadonlyArray<Vec2>, edgeTol = 1e-4): boolean {
-  const n = poly.length
-  if (n < 3) return false
-  let inside = false
-  for (let i = 0, j = n - 1; i < n; j = i++) {
-    const xi = poly[i]![0]
-    const zi = poly[i]![1]
-    const xj = poly[j]![0]
-    const zj = poly[j]![1]
-    if (edgeTol > 0 && pointToSegmentDist2D(px, pz, xj, zj, xi, zi) <= edgeTol) return true
-    const intersect = zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi + 1e-18) + xi
-    if (intersect) inside = !inside
+function toCanonicalWallSeg(
+  id: string,
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  len: number,
+): CanonicalWall {
+  const ux = (bx - ax) / len
+  const uz = (bz - az) / len
+  return {
+    id,
+    levelId: null,
+    start: [ax, az],
+    end: [bx, bz],
+    lengthM: len,
+    ux,
+    uz,
+    nx: -uz,
+    nz: ux,
+    heightM: 2.7,
+    thicknessM: 0.14,
+    visible: true,
+    openings: [],
   }
-  return inside
-}
-
-function polygonArea2D(poly: ReadonlyArray<Vec2>): number {
-  let sum = 0
-  for (let i = 0; i < poly.length; i++) {
-    const a = poly[i]!
-    const b = poly[(i + 1) % poly.length]!
-    sum += a[0] * b[1] - b[0] * a[1]
-  }
-  return Math.abs(sum) * 0.5
-}
-
-function polygonBounds2D(poly: ReadonlyArray<Vec2>): {
-  minX: number
-  maxX: number
-  minZ: number
-  maxZ: number
-} {
-  let minX = Number.POSITIVE_INFINITY
-  let maxX = Number.NEGATIVE_INFINITY
-  let minZ = Number.POSITIVE_INFINITY
-  let maxZ = Number.NEGATIVE_INFINITY
-  for (const [x, z] of poly) {
-    if (!Number.isFinite(x) || !Number.isFinite(z)) continue
-    if (x < minX) minX = x
-    if (x > maxX) maxX = x
-    if (z < minZ) minZ = z
-    if (z > maxZ) maxZ = z
-  }
-  return { minX, maxX, minZ, maxZ }
-}
-
-/**
- * Exact 2D segment vs. simple (convex or concave) polygon clipping in XZ.
- * Returns sorted, merged `[t0, t1]` parameter intervals lying inside `poly`.
- */
-function clipSegmentToPolygon2D(a: Vec2, b: Vec2, poly: ReadonlyArray<Vec2>): Array<[number, number]> {
-  const n = poly.length
-  if (n < 3) return []
-  const dx = b[0] - a[0]
-  const dz = b[1] - a[1]
-  const segLen = Math.hypot(dx, dz)
-  if (segLen < 1e-6) return []
-
-  const ts: number[] = [0, 1]
-  for (let i = 0; i < n; i++) {
-    const v0 = poly[i]!
-    const v1 = poly[(i + 1) % n]!
-    const ex = v1[0] - v0[0]
-    const ez = v1[1] - v0[1]
-    const denom = dx * ez - dz * ex
-    if (Math.abs(denom) > 1e-10) {
-      const t = ((v0[0] - a[0]) * ez - (v0[1] - a[1]) * ex) / denom
-      const u = ((v0[0] - a[0]) * dz - (v0[1] - a[1]) * dx) / denom
-      if (t > 1e-7 && t < 1 - 1e-7 && u >= -1e-6 && u <= 1 + 1e-6) {
-        ts.push(t)
-      }
-    } else {
-      // Collinear edge: project edge endpoints onto segment
-      for (const v of [v0, v1]) {
-        const perp = Math.abs((v[0] - a[0]) * dz - (v[1] - a[1]) * dx) / segLen
-        if (perp <= 1e-4) {
-          const t = ((v[0] - a[0]) * dx + (v[1] - a[1]) * dz) / (segLen * segLen)
-          if (t > 1e-7 && t < 1 - 1e-7) ts.push(t)
-        }
-      }
-    }
-  }
-
-  ts.sort((x, y) => x - y)
-  const uniq: number[] = [ts[0]!]
-  for (let i = 1; i < ts.length; i++) {
-    if (ts[i]! - uniq[uniq.length - 1]! > 1e-6) uniq.push(ts[i]!)
-  }
-
-  const kept: Array<[number, number]> = []
-  for (let i = 0; i < uniq.length - 1; i++) {
-    const t0 = uniq[i]!
-    const t1 = uniq[i + 1]!
-    if (t1 - t0 < 1e-6) continue
-    const tm = (t0 + t1) * 0.5
-    if (pointInPolygon2D(a[0] + dx * tm, a[1] + dz * tm, poly, 1e-4)) {
-      const prev = kept[kept.length - 1]
-      if (prev && t0 - prev[1] <= 1e-5) prev[1] = t1
-      else kept.push([t0, t1])
-    }
-  }
-  return kept
-}
-
-/**
- * 16-ray enclosure test: returns true when `(px, pz)` lies strictly inside a closed
- * walled building envelope (immune to interior partition walls, concave L/U-shapes,
- * and arbitrary building rotations).
- */
-function isPointEnclosedByWalls(px: number, pz: number, wallSegs: ReadonlyArray<WallSeg2D>): boolean {
-  if (wallSegs.length < 3) return false
-  const RAYS = 16
-  const phase = 0.037 // irrational-like offset avoids dead-parallel rays and corner grazing
-  for (let k = 0; k < RAYS; k++) {
-    const ang = phase + (k * Math.PI * 2) / RAYS
-    const rdx = Math.cos(ang)
-    const rdz = Math.sin(ang)
-    let hit = false
-    for (let i = 0; i < wallSegs.length; i++) {
-      const w = wallSegs[i]!
-      const ex = w.bx - w.ax
-      const ez = w.bz - w.az
-      const denom = rdx * ez - rdz * ex
-      if (Math.abs(denom) <= 1e-10) continue
-      const t = ((w.ax - px) * ez - (w.az - pz) * ex) / denom
-      if (t <= 1e-4) continue
-      const u = ((w.ax - px) * rdz - (w.az - pz) * rdx) / denom
-      const ext = Math.min(0.25, 0.15 / Math.max(0.25, w.len))
-      if (u >= -ext && u <= 1 + ext) {
-        hit = true
-        break
-      }
-    }
-    if (!hit) return false
-  }
-  return true
 }
 
 function pointNearPolygonEdges2D(px: number, pz: number, poly: ReadonlyArray<Vec2>, maxDist: number): boolean {
@@ -429,7 +323,7 @@ function pointNearPolygonEdges2D(px: number, pz: number, poly: ReadonlyArray<Vec
   for (let i = 0; i < n; i++) {
     const a = poly[i]!
     const b = poly[(i + 1) % n]!
-    if (pointToSegmentDist2D(px, pz, a[0], a[1], b[0], b[1]) <= maxDist) return true
+    if (distancePointToSegment2D(px, pz, a[0], a[1], b[0], b[1]) <= maxDist) return true
   }
   return false
 }
@@ -440,62 +334,16 @@ function pointNearPolygonEdges2D(px: number, pz: number, poly: ReadonlyArray<Vec
  */
 function isOutdoorOrUnwalledSlab(
   slab: SceneNodeLike,
-  wallSegs: ReadonlyArray<WallSeg2D>,
+  wallSegs: readonly CanonicalWall[],
   outdoorZonePolys: ReadonlyArray<ReadonlyArray<Vec2>>,
   baseWallElev: number,
 ): boolean {
-  const label = `${String(slab.name ?? '')} ${String(slab.category ?? '')} ${String(slab.role ?? '')} ${String(slab.material ?? '')}`
-  if (OUTDOOR_SLAB_RE.test(label)) return true
-
-  const poly = slab.polygon as ReadonlyArray<Vec2>
-  const b = polygonBounds2D(poly)
-  if (!Number.isFinite(b.minX)) return true
-
-  // Sample verified interior points inside `poly` (safe for concave U/L-shaped slabs whose vertex-average centroid
-  // may fall in an outdoor courtyard/pool cutout outside `poly`).
-  let cx = 0
-  let cz = 0
-  for (const [x, z] of poly) {
-    cx += x
-    cz += z
-  }
-  cx /= poly.length
-  cz /= poly.length
-
-  const samples: Vec2[] = []
-  if (pointInPolygon2D(cx, cz, poly, 0)) samples.push([cx, cz])
-  const gridN = 5
-  for (let ix = 0; ix < gridN; ix++) {
-    const sx = b.minX + ((b.maxX - b.minX) * (ix + 0.5)) / gridN
-    for (let iz = 0; iz < gridN; iz++) {
-      const sz = b.minZ + ((b.maxZ - b.minZ) * (iz + 0.5)) / gridN
-      if (pointInPolygon2D(sx, sz, poly, 0)) samples.push([sx, sz])
-    }
-  }
-  if (samples.length === 0) samples.push([cx, cz])
-
-  if (outdoorZonePolys.length > 0) {
-    let outdoorCount = 0
-    for (const [sx, sz] of samples) {
-      if (outdoorZonePolys.some((zp) => pointInPolygon2D(sx, sz, zp, 0.02))) outdoorCount += 1
-    }
-    if (outdoorCount / samples.length >= 0.5) return true
-  }
-
-  if (wallSegs.length >= 3) {
-    let enclosed = 0
-    for (const [sx, sz] of samples) {
-      if (isPointEnclosedByWalls(sx, sz, wallSegs)) enclosed += 1
-    }
-    const enclosedRatio = enclosed / samples.length
-    const area = polygonArea2D(poly)
-    const elev = typeof slab.elevation === 'number' && Number.isFinite(slab.elevation) ? slab.elevation : 0
-    // Exclude small elevated exterior steps/stoops (e.g. elev 0.30..0.40m pads) not enclosed by walls
-    if (area < 4.5 && elev > baseWallElev + 0.12 && enclosedRatio < 0.5) return true
-    if (enclosedRatio < 0.35) return true
-  }
-
-  return false
+  return kernelIsOutdoorOrUnwalledSlab(
+    slab as KernelSceneNodeLike,
+    wallSegs,
+    outdoorZonePolys,
+    baseWallElev,
+  )
 }
 
 /**
@@ -578,49 +426,57 @@ function subtractInterval1D(
   return out
 }
 
+const KERNEL_ROOF_KINDS: ReadonlySet<string> = new Set<RoofSegmentKind>([
+  'flat',
+  'shed',
+  'gable',
+  'hip',
+  'dutch',
+  'mansard',
+  'conical',
+])
+
+function toCanonicalRoofSegment(seg: ExtractedRoofSegment): CanonicalRoofSegment {
+  if (seg.canonical) return seg.canonical
+  const frame = resolveCanonicalRoofFrame(seg)
+  const roofType: RoofSegmentKind = KERNEL_ROOF_KINDS.has(seg.roofType)
+    ? (seg.roofType as RoofSegmentKind)
+    : 'gable'
+  return {
+    id: 'synthetic',
+    levelId: null,
+    adoptedFromWallLessLevel: false,
+    cx: seg.cx,
+    cz: seg.cz,
+    eaveY: seg.cy,
+    width: seg.widthM,
+    depth: seg.depthM,
+    wallHeightM: seg.wallHeightM,
+    pitchDeg: (seg.pitchRad * 180) / Math.PI,
+    pitchRad: seg.pitchRad,
+    roofType,
+    yaw: seg.yaw,
+    cos: Math.cos(seg.yaw),
+    sin: Math.sin(seg.yaw),
+    effWidth: frame.effWidth,
+    effDepth: frame.effDepth,
+    effYaw: frame.effYaw,
+    effCos: Math.cos(frame.effYaw),
+    effSin: Math.sin(frame.effYaw),
+    peakY: seg.cy + frame.riseM,
+    overhangM: seg.overhangM,
+  }
+}
+
 /**
  * Evaluate the top roof-plane elevation `y` of `seg` at world `(wx, wz)`, or `null`
  * if `(wx, wz)` falls outside `seg`'s plan footprint (including eave overhang).
  */
 function evaluateRoofSurfaceY(seg: ExtractedRoofSegment, wx: number, wz: number): number | null {
-  const frame = resolveCanonicalRoofFrame(seg)
-  const cosR = Math.cos(frame.effYaw)
-  const sinR = Math.sin(frame.effYaw)
-  const dx = wx - seg.cx
-  const dz = wz - seg.cz
-  // Exact inverse of Three.js Ry(effYaw): (lx*cos + lz*sin, -lx*sin + lz*cos)
-  const lx = dx * cosR - dz * sinR
-  const lz = dx * sinR + dz * cosR
-
-  if (seg.roofType === 'conical') {
-    const r = frame.halfRun
-    const dist = Math.hypot(lx, lz)
-    if (dist > r + seg.overhangM + 0.02) return null
-    return seg.cy + (r - dist) * frame.effSlopeTan
-  }
-
-  const hasEndOverhang =
-    seg.roofType === 'hip' || seg.roofType === 'dutch' || seg.roofType === 'mansard'
-  const padX = hasEndOverhang ? seg.overhangM + 0.02 : 0.02
-  if (Math.abs(lx) > frame.halfW + padX || Math.abs(lz) > frame.halfRun + seg.overhangM + 0.02) {
-    return null
-  }
-  if (seg.roofType === 'flat' || seg.pitchRad <= 1e-4) {
-    return seg.cy
-  }
-  if (seg.roofType === 'shed') {
-    return seg.cy + (frame.halfRun - lz) * frame.effSlopeTan
-  }
-  if (seg.roofType === 'hip' || seg.roofType === 'dutch') {
-    const dX = frame.halfW - Math.abs(lx)
-    const dZ = frame.halfRun - Math.abs(lz)
-    return seg.cy + Math.min(frame.riseM, Math.min(dX, dZ) * frame.effSlopeTan)
-  }
-  if (seg.roofType === 'mansard') {
-    const dMin = Math.min(frame.halfW - Math.abs(lx), frame.halfRun - Math.abs(lz))
-    return seg.cy + Math.min(frame.riseM, dMin * frame.effSlopeTan)
-  }
-  return seg.cy + (frame.halfRun - Math.abs(lz)) * frame.effSlopeTan
+  return evaluateRoofSegmentSurfaceY(toCanonicalRoofSegment(seg), wx, wz, {
+    clampOverhangToEave: false,
+    footprintPadM: 0.02,
+  })
 }
 
 function roofSegmentPeakY(seg: ExtractedRoofSegment): number {
@@ -775,30 +631,10 @@ function findImmediateLowerWalledLevel(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
 ): SceneNodeLike | null {
-  if (!levelId) return null
-  const target = nodes[levelId]
-  if (!target || target.type !== 'level') return null
-  const targetOrder = levelSortOrder(target)
-  const targetParent = typeof target.parentId === 'string' ? target.parentId : null
-  const all = Object.values(nodes)
-
-  let best: SceneNodeLike | null = null
-  let bestOrder = Number.NEGATIVE_INFINITY
-  for (const n of all) {
-    if (n.type !== 'level' || n.id === levelId) continue
-    const nParent = typeof n.parentId === 'string' ? n.parentId : null
-    if (targetParent && nParent && nParent !== targetParent) continue
-    const ord = levelSortOrder(n)
-    if (ord >= targetOrder || ord <= bestOrder) continue
-    const hasWalls = all.some(
-      (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id),
-    )
-    if (hasWalls) {
-      best = n
-      bestOrder = ord
-    }
-  }
-  return best
+  return kernelFindImmediateLowerWalledLevel(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    levelId,
+  ) as SceneNodeLike | null
 }
 
 /**
@@ -852,86 +688,39 @@ function extractLevelRoofSegments(
   const isUpperLevel = !isLowestWalledLevelInBuilding(nodes, levelId)
   const lowerWalledLevel = isUpperLevel ? findImmediateLowerWalledLevel(nodes, levelId) : null
 
-  for (const node of Object.values(nodes)) {
-    // Always frame architectural roof-segments even when their shingle shell is hidden (visible === false)
-    // in Framing X-Ray mode or persisted X-Ray scenes; structural roof framing has its own `visibleSystems.roof` toggle.
-    if (node.type !== 'roof-segment') continue
+  // Always frame architectural roof-segments even when their shingle shell is hidden (visible === false)
+  // in Framing X-Ray mode or persisted X-Ray scenes; structural roof framing has its own `visibleSystems.roof` toggle.
+  const canonicalSegs = extractCanonicalRoofSegments(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    levelId,
+    defaultWallHeightM,
+    { includeHidden: true, levelBaseY },
+  )
 
-    const segPos = Array.isArray(node.position) ? (node.position as number[]) : [0, 0, 0]
-    let px = typeof segPos[0] === 'number' ? segPos[0] : 0
-    let py = typeof segPos[1] === 'number' ? segPos[1] : 0
-    let pz = typeof segPos[2] === 'number' ? segPos[2] : 0
-    let yaw = typeof node.rotation === 'number' ? node.rotation : 0
-
-    const widthM = typeof node.width === 'number' && node.width > 0.2 ? node.width : 6.0
-    const depthM = typeof node.depth === 'number' && node.depth > 0.2 ? node.depth : 6.0
-
-    let curParentId = typeof node.parentId === 'string' ? node.parentId : null
-    let belongsHere = false
-    let wasAdoptedFromWallLessLevel = false
-    for (let hop = 0; hop < 6 && curParentId; hop++) {
-      if (!levelId || curParentId === levelId) {
-        belongsHere = true
-        break
+  for (const seg of canonicalSegs) {
+    // Accumulate raw roof-container local Y to preserve exact Zero-Gap Bearing Extension heuristic
+    let rawPy = 0
+    let cur: SceneNodeLike | undefined = nodes[seg.id]
+    for (let hop = 0; hop < 8 && cur; hop++) {
+      if (Array.isArray(cur.position) && typeof cur.position[1] === 'number' && Number.isFinite(cur.position[1])) {
+        rawPy += cur.position[1]
       }
-      const parent = nodes[curParentId]
-      if (!parent) break
-      if (parent.type === 'level') {
-        const absCos = Math.abs(Math.cos(yaw))
-        const absSin = Math.abs(Math.sin(yaw))
-        const halfX = (widthM * absCos + depthM * absSin) / 2
-        const halfZ = (widthM * absSin + depthM * absCos) / 2
-        belongsHere = shouldAdoptRoofSegmentOntoLevel(nodes, levelId, parent, px, pz, halfX, halfZ)
-        wasAdoptedFromWallLessLevel = belongsHere
-        break
-      }
-      if (parent.type === 'roof') {
-        const rot = typeof parent.rotation === 'number' ? parent.rotation : 0
-        const rp = Array.isArray(parent.position) ? (parent.position as number[]) : [0, 0, 0]
-        const cos = Math.cos(rot)
-        const sin = Math.sin(rot)
-        const nx = px * cos + pz * sin
-        const nz = -px * sin + pz * cos
-        px = nx + (typeof rp[0] === 'number' ? rp[0] : 0)
-        py += typeof rp[1] === 'number' ? rp[1] : 0
-        pz = nz + (typeof rp[2] === 'number' ? rp[2] : 0)
-        yaw += rot
-      }
-      curParentId = typeof parent.parentId === 'string' ? parent.parentId : null
+      if (typeof cur.parentId !== 'string') break
+      const parent = nodes[cur.parentId]
+      if (!parent || parent.type !== 'roof') break
+      cur = parent
     }
-    if (!belongsHere) continue
 
-    const rawPitch = typeof node.pitch === 'number' && Number.isFinite(node.pitch) ? node.pitch : 26.57
-    // Pascal roof-segment stores pitch in DEGREES (e.g. 26.57 for 6:12); handle radians if <= 1.4
-    const pitchRad =
-      rawPitch <= 0
-        ? 0
-        : rawPitch > 1.4
-          ? (Math.min(65, rawPitch) * Math.PI) / 180
-          : Math.min((65 * Math.PI) / 180, rawPitch)
-    const overhangM = typeof node.overhang === 'number' && node.overhang >= 0 ? node.overhang : 0.35
-    const segWallH = typeof node.wallHeight === 'number' && node.wallHeight >= 0 ? node.wallHeight : 0
-
-    // VIS-V3-02 / Polish A: A roof-segment directly parented to a walled upper level renders in that
-    // level's local coordinate system at `py` (0 = top of the lower story's walls/columns), NEVER
-    // shifted up by `+defaultWallHeightM`. Only roofs adopted from a wall-less Roof level above
-    // (or placed on a ground-floor single-story level) seat on top of `defaultWallHeightM`.
-    const isDirectUpperWingRoof = !wasAdoptedFromWallLessLevel && isUpperLevel && py <= 0.05
-    const cy =
-      py > 0.05
-        ? py + segWallH
-        : isDirectUpperWingRoof
-          ? levelBaseY + segWallH
-          : levelBaseY + defaultWallHeightM + segWallH
+    const isDirectUpperWingRoof = !seg.adoptedFromWallLessLevel && isUpperLevel && rawPy <= 0.05
+    const absCos = Math.abs(seg.cos)
+    const absSin = Math.abs(seg.sin)
+    const halfX = (seg.width * absCos + seg.depth * absSin) / 2
+    const halfZ = (seg.width * absSin + seg.depth * absCos) / 2
+    let heelHeightM = seg.wallHeightM
 
     // Zero-Gap Bearing Extension: bridge any floor-to-floor `level.height` vs. exterior bearing
     // `wall.height` band delta (e.g. 2.80m stack vs. 2.50m walls -> +0.30m) so raised-heel knee walls
     // and gable rake studs rest wood-to-wood directly on top of the actual double top plate.
-    const absCos = Math.abs(Math.cos(yaw))
-    const absSin = Math.abs(Math.sin(yaw))
-    const halfX = (widthM * absCos + depthM * absSin) / 2
-    const halfZ = (widthM * absSin + depthM * absCos) / 2
-    let heelHeightM = segWallH
     if (isDirectUpperWingRoof) {
       if (lowerWalledLevel) {
         const lowerStackH =
@@ -942,40 +731,41 @@ function extractLevelRoofSegments(
           nodes,
           lowerWalledLevel.id,
           lowerStackH,
-          px - halfX - 0.5,
-          px + halfX + 0.5,
-          pz - halfZ - 0.5,
-          pz + halfZ + 0.5,
+          seg.cx - halfX - 0.5,
+          seg.cx + halfX + 0.5,
+          seg.cz - halfZ - 0.5,
+          seg.cz + halfZ + 0.5,
         )
         const bandGapM = Math.max(0, Math.min(0.65, lowerStackH - lowerBearingH))
-        heelHeightM = segWallH + bandGapM
+        heelHeightM = seg.wallHeightM + bandGapM
       }
-    } else if (py <= 0.05) {
+    } else if (rawPy <= 0.05) {
       const bearingH = resolveBearingWallHeightInBox(
         nodes,
         levelId,
         defaultWallHeightM,
-        px - halfX - 0.5,
-        px + halfX + 0.5,
-        pz - halfZ - 0.5,
-        pz + halfZ + 0.5,
+        seg.cx - halfX - 0.5,
+        seg.cx + halfX + 0.5,
+        seg.cz - halfZ - 0.5,
+        seg.cz + halfZ + 0.5,
       )
-      const bandGapM = Math.max(0, Math.min(0.65, cy - (levelBaseY + bearingH) - segWallH))
-      heelHeightM = segWallH + bandGapM
+      const bandGapM = Math.max(0, Math.min(0.65, seg.eaveY - (levelBaseY + bearingH) - seg.wallHeightM))
+      heelHeightM = seg.wallHeightM + bandGapM
     }
 
     out.push({
-      cx: px,
-      cy,
-      cz: pz,
-      yaw,
-      roofType: typeof node.roofType === 'string' ? node.roofType : 'gable',
-      widthM,
-      depthM,
-      pitchRad,
-      overhangM,
-      wallHeightM: segWallH,
+      cx: seg.cx,
+      cy: seg.eaveY,
+      cz: seg.cz,
+      yaw: seg.yaw,
+      roofType: seg.roofType,
+      widthM: seg.width,
+      depthM: seg.depth,
+      pitchRad: seg.pitchRad,
+      overhangM: seg.overhangM,
+      wallHeightM: seg.wallHeightM,
       heelHeightM,
+      canonical: seg,
     })
   }
 
@@ -1062,7 +852,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   const jDepthM = joistDepthIn * INCHES_TO_METERS
 
   // Precompute visible wall segments and outdoor zone polygons for enclosed-footprint & slab filtering (VIS-02 / VIS-03)
-  const visibleWallSegs: WallSeg2D[] = []
+  const visibleWallSegs: CanonicalWall[] = []
   let minWallElev = Number.POSITIVE_INFINITY
   for (const w of walls) {
     if (w.visible === false) continue
@@ -1072,7 +862,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     const bz = Number(w.end![1])
     const len = Math.hypot(bx - ax, bz - az)
     if (Number.isFinite(len) && len >= 0.25) {
-      visibleWallSegs.push({ ax, az, bx, bz, len })
+      visibleWallSegs.push(toCanonicalWallSeg(w.id, ax, az, bx, bz, len))
       const elev = typeof w.elevation === 'number' && Number.isFinite(w.elevation) ? w.elevation : 0
       if (elev < minWallElev) minWallElev = elev
     }
@@ -1412,7 +1202,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
     for (const slab of interiorSlabs) {
       const poly = slab.polygon as ReadonlyArray<Vec2>
       const b = polygonBounds2D(poly)
-      if (Number.isFinite(b.minX) && b.maxX - b.minX > 0.5 && b.maxZ - b.minZ > 0.5) {
+      if (b && b.maxX - b.minX > 0.5 && b.maxZ - b.minZ > 0.5) {
         const elev = typeof slab.elevation === 'number' && Number.isFinite(slab.elevation) ? slab.elevation : 0
         const slabThick = typeof slab.thickness === 'number' && slab.thickness > 0 ? slab.thickness : 0.05
         // Seat floor joists strictly below the slab soffit so plates/flanges never z-fight through finished flooring
@@ -1433,10 +1223,10 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       let wMinZ = Number.POSITIVE_INFINITY
       let wMaxZ = Number.NEGATIVE_INFINITY
       for (const ws of visibleWallSegs) {
-        wMinX = Math.min(wMinX, ws.ax, ws.bx)
-        wMaxX = Math.max(wMaxX, ws.ax, ws.bx)
-        wMinZ = Math.min(wMinZ, ws.az, ws.bz)
-        wMaxZ = Math.max(wMaxZ, ws.az, ws.bz)
+        wMinX = Math.min(wMinX, ws.start[0], ws.end[0])
+        wMaxX = Math.max(wMaxX, ws.start[0], ws.end[0])
+        wMinZ = Math.min(wMinZ, ws.start[1], ws.end[1])
+        wMaxZ = Math.max(wMaxZ, ws.start[1], ws.end[1])
       }
       if (Number.isFinite(wMinX) && wMaxX - wMinX > 1 && wMaxZ - wMinZ > 1) {
         floorRegions.push({
@@ -1481,12 +1271,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       } else {
         // Wall-only fallback: align rim joists along actual wall footprints instead of an oversized AABB
         for (const ws of visibleWallSegs) {
-          const ux = (ws.bx - ws.ax) / ws.len
-          const uz = (ws.bz - ws.az) / ws.len
-          const nx = -uz
-          const nz = ux
-          const eRotY = -Math.atan2(uz, ux)
-          pushWallBox('osb-web', ws.ax, ws.az, ux, uz, nx, nz, eRotY, ws.len / 2, jCenterY, ws.len, jDepthM, rimThick)
+          const eRotY = -Math.atan2(ws.uz, ws.ux)
+          pushWallBox('osb-web', ws.start[0], ws.start[1], ws.ux, ws.uz, ws.nx, ws.nz, eRotY, ws.lengthM / 2, jCenterY, ws.lengthM, jDepthM, rimThick)
         }
       }
 
@@ -1656,7 +1442,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         let cMaxX = Number.NEGATIVE_INFINITY
         let cMinZ = Number.POSITIVE_INFINITY
         let cMaxZ = Number.NEGATIVE_INFINITY
-        const clusterWallSegs: WallSeg2D[] = []
+        const clusterWallSegs: CanonicalWall[] = []
         for (const w of clusterWalls) {
           const ax = Number(w.start![0])
           const az = Number(w.start![1])
@@ -1664,7 +1450,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const bz = Number(w.end![1])
           const len = Math.hypot(bx - ax, bz - az)
           if (!Number.isFinite(len) || len < 0.25) continue
-          clusterWallSegs.push({ ax, az, bx, bz, len })
+          clusterWallSegs.push(toCanonicalWallSeg(w.id, ax, az, bx, bz, len))
           cMinX = Math.min(cMinX, ax, bx)
           cMaxX = Math.max(cMaxX, ax, bx)
           cMinZ = Math.min(cMinZ, az, bz)
@@ -1676,13 +1462,13 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         for (const s of interiorSlabs) {
           const poly = s.polygon as ReadonlyArray<Vec2>
           const sb = polygonBounds2D(poly)
-          if (sb.minX <= cMaxX + 0.45 && sb.maxX >= cMinX - 0.45 && sb.minZ <= cMaxZ + 0.45 && sb.maxZ >= cMinZ - 0.45) {
+          if (sb && sb.minX <= cMaxX + 0.45 && sb.maxX >= cMinX - 0.45 && sb.minZ <= cMaxZ + 0.45 && sb.maxZ >= cMinZ - 0.45) {
             clusterInteriorPolys.push(poly)
           }
         }
         for (const zp of indoorZonePolys) {
           const zb = polygonBounds2D(zp)
-          if (zb.minX <= cMaxX + 0.45 && zb.maxX >= cMinX - 0.45 && zb.minZ <= cMaxZ + 0.45 && zb.maxZ >= cMinZ - 0.45) {
+          if (zb && zb.minX <= cMaxX + 0.45 && zb.maxX >= cMinX - 0.45 && zb.minZ <= cMaxZ + 0.45 && zb.maxZ >= cMinZ - 0.45) {
             clusterInteriorPolys.push(zp)
           }
         }
@@ -1717,7 +1503,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           if (clusterWallSegs.length >= 3 && isPointEnclosedByWalls(x, z, clusterWallSegs)) return true
           if (marginM > 0) {
             for (const ws of clusterWallSegs) {
-              if (pointToSegmentDist2D(x, z, ws.ax, ws.az, ws.bx, ws.bz) <= marginM) return true
+              if (distancePointToSegment2D(x, z, ws.start[0], ws.start[1], ws.end[0], ws.end[1]) <= marginM) return true
             }
             for (const p of clusterInteriorPolys) {
               if (pointNearPolygonEdges2D(x, z, p, marginM)) return true
@@ -1840,12 +1626,8 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
           // Perimeter rim joists seated on top of perimeter walls
           for (const ws of clusterWallSegs) {
-            const ux = (ws.bx - ws.ax) / ws.len
-            const uz = (ws.bz - ws.az) / ws.len
-            const nx = -uz
-            const nz = ux
-            const eRotY = -Math.atan2(uz, ux)
-            pushWallBox('osb-web', ws.ax, ws.az, ux, uz, nx, nz, eRotY, ws.len / 2, deckCenterY, ws.len, flatDepthM, memberThickM)
+            const eRotY = -Math.atan2(ws.uz, ws.ux)
+            pushWallBox('osb-web', ws.start[0], ws.start[1], ws.ux, ws.uz, ws.nx, ws.nz, eRotY, ws.lengthM / 2, deckCenterY, ws.lengthM, flatDepthM, memberThickM)
           }
 
           // Flat roof joists clipped to enclosed footprint and split cleanly around every RTU curb opening
@@ -2007,7 +1789,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       )
       if (lowerWalls.length < 3) return
 
-      const lowerWallSegs: WallSeg2D[] = []
+      const lowerWallSegs: CanonicalWall[] = []
       let lMinX = Number.POSITIVE_INFINITY
       let lMaxX = Number.NEGATIVE_INFINITY
       let lMinZ = Number.POSITIVE_INFINITY
@@ -2020,7 +1802,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         const bz = Number(w.end![1])
         const len = Math.hypot(bx - ax, bz - az)
         if (!Number.isFinite(len) || len < 0.25) continue
-        lowerWallSegs.push({ ax, az, bx, bz, len })
+        lowerWallSegs.push(toCanonicalWallSeg(w.id, ax, az, bx, bz, len))
         lMinX = Math.min(lMinX, ax, bx)
         lMaxX = Math.max(lMaxX, ax, bx)
         lMinZ = Math.min(lMinZ, az, bz)
@@ -2060,7 +1842,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         if (lowerBldgId && nParent && nParent !== lowerBldgId) return false
         return levelSortOrder(n) > lowerOrder
       })
-      const upperWallSegs: WallSeg2D[] = []
+      const upperWallSegs: CanonicalWall[] = []
       const upperCoverPolys: Array<ReadonlyArray<Vec2>> = []
       const upperLevelIds = new Set<string>()
       for (const ul of upperLevels) {
@@ -2076,7 +1858,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
           const bx = Number(w.end![0])
           const bz = Number(w.end![1])
           const len = Math.hypot(bx - ax, bz - az)
-          if (Number.isFinite(len) && len >= 0.25) upperWallSegs.push({ ax, az, bx, bz, len })
+          if (Number.isFinite(len) && len >= 0.25) upperWallSegs.push(toCanonicalWallSeg(w.id, ax, az, bx, bz, len))
         }
         for (const n of ulNodes) {
           if (
@@ -2155,7 +1937,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
         if (lowerWallSegs.length >= 3 && isPointEnclosedByWalls(x, z, lowerWallSegs)) return true
         if (wallMarginM > 0) {
           for (const ws of lowerWallSegs) {
-            if (pointToSegmentDist2D(x, z, ws.ax, ws.az, ws.bx, ws.bz) <= wallMarginM) return true
+            if (distancePointToSegment2D(x, z, ws.start[0], ws.start[1], ws.end[0], ws.end[1]) <= wallMarginM) return true
           }
         }
         return false
@@ -2164,7 +1946,7 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       const isCoveredByUpperOrRoof = (x: number, z: number, padM = 0.15): boolean => {
         if (upperCoverPolys.some((p) => pointInPolygon2D(x, z, p, padM))) return true
         if (upperWallSegs.length >= 3 && isPointEnclosedByWalls(x, z, upperWallSegs)) return true
-        if (padM > 0 && upperWallSegs.some((ws) => pointToSegmentDist2D(x, z, ws.ax, ws.az, ws.bx, ws.bz) <= padM)) {
+        if (padM > 0 && upperWallSegs.some((ws) => distancePointToSegment2D(x, z, ws.start[0], ws.start[1], ws.end[0], ws.end[1]) <= padM)) {
           return true
         }
         if (explicitCoverRoofs.length > 0 && isInsideRoofSet(explicitCoverRoofs, x, z, padM)) return true
@@ -2243,20 +2025,16 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
 
       // Perimeter rim joists seated cleanly on top of walls bordering the uncovered 1-story wing
       for (const ws of lowerWallSegs) {
-        const ux = (ws.bx - ws.ax) / ws.len
-        const uz = (ws.bz - ws.az) / ws.len
-        const nx = -uz
-        const nz = ux
         const rimSegs = clipSegmentToFootprint3D(
-          [ws.ax, deckCenterY, ws.az],
-          [ws.bx, deckCenterY, ws.bz],
+          [ws.start[0], deckCenterY, ws.start[1]],
+          [ws.end[0], deckCenterY, ws.end[1]],
           (x, z) =>
             isInsideLowerIndoor(x, z, 0.15) &&
             !isCoveredByUpperOrRoof(x, z, 0.05) &&
-            (inUncoveredWing(x + nx * 0.25, z + nz * 0.25) !== inUncoveredWing(x - nx * 0.25, z - nz * 0.25)),
+            (inUncoveredWing(x + ws.nx * 0.25, z + ws.nz * 0.25) !== inUncoveredWing(x - ws.nx * 0.25, z - ws.nz * 0.25)),
           0.35,
         )
-        const eRotY = -Math.atan2(uz, ux)
+        const eRotY = -Math.atan2(ws.uz, ws.ux)
         for (const rs of rimSegs) {
           const rLen = Math.hypot(rs.end[0] - rs.start[0], rs.end[2] - rs.start[2])
           if (rLen < 0.25) continue

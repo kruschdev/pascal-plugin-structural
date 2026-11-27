@@ -3,6 +3,7 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
+import { IRC_WIND_SEISMIC_THRESHOLDS } from './rules'
 import {
   BEAM_CATALOG,
   type BeamCatalogEntry,
@@ -601,7 +602,7 @@ export function sizeRoofSystem(params: {
     ridgeBaysNeeded,
     recommendedRidgeBeam,
     hurricaneTieSku,
-    gableClipSku: design.windMph >= 130 ? 'HGA10' : 'A35',
+    gableClipSku: design.windMph >= IRC_WIND_SEISMIC_THRESHOLDS.strapWindMph ? 'HGA10' : 'A35',
     codeRef: needsStructuralRidgeBeam ? 'IRC R802.4.3 / R802.4.1' : 'IRC Table R802.4.1(1)/(5)',
   }
 }
@@ -794,9 +795,21 @@ export function selectHurricaneTieSku(params: {
 }): string {
   const { windMph, exposure, isGirderTruss = false, upliftDemandLbs = 0 } = params
   if (isGirderTruss || upliftDemandLbs > 1600) return 'HGA10'
-  if (windMph >= 150 || (windMph >= 140 && exposure === 'D') || upliftDemandLbs > 1300) return 'HTS20'
-  if (windMph >= 130 || (windMph >= 120 && exposure !== 'B') || upliftDemandLbs > 600) return 'H10A'
-  if (windMph >= 115) return 'H2.5A'
+  if (
+    windMph >= 150 ||
+    (windMph >= IRC_WIND_SEISMIC_THRESHOLDS.heavyStrapWindMph && exposure === 'D') ||
+    upliftDemandLbs > 1300
+  ) {
+    return 'HTS20'
+  }
+  if (
+    windMph >= IRC_WIND_SEISMIC_THRESHOLDS.strapWindMph ||
+    (windMph >= 120 && exposure !== 'B') ||
+    upliftDemandLbs > 600
+  ) {
+    return 'H10A'
+  }
+  if (windMph >= IRC_WIND_SEISMIC_THRESHOLDS.roofTieWindMph) return 'H2.5A'
   return 'H1'
 }
 

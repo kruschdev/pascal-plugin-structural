@@ -67,6 +67,9 @@
     "render:walkthrough": "bun scripts/render-walkthrough-video.ts",
     "check": "bun run check-types && bun test && bun run check:render && bun run build"
   },
+  "dependencies": {
+    "@kruschdev/pascal-mep-kernel": "file:../pascal-mep-kernel"
+  },
   "peerDependencies": {
     "@pascal-app/core": ">=1.0.0 <2",
     "@pascal-app/editor": ">=1.0.0 <2",

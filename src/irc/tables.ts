@@ -13,6 +13,17 @@
  * - IRC R302.11 fire blocking & R302.12 draftstopping rules and approved materials
  */
 
+import {
+  type SceneNodeLike as KernelSceneNodeLike,
+  belongsToLevel as kernelBelongsToLevel,
+  isGroundOrLowestWalledLevel as kernelIsGroundOrLowestWalledLevel,
+  isHighestWalledLevelInBuilding as kernelIsHighestWalledLevelInBuilding,
+  levelSortOrder as kernelLevelSortOrder,
+  resolveNodeLevelId as kernelResolveNodeLevelId,
+  shouldAdoptRoofSegmentOntoLevel as kernelShouldAdoptRoofSegmentOntoLevel,
+  shouldAdoptWallLessRoofLevel as kernelShouldAdoptWallLessRoofLevel,
+} from '@kruschdev/pascal-mep-kernel'
+
 export const INCHES_TO_METERS = 0.0254
 export const FEET_TO_METERS = 0.3048
 export const METERS_TO_INCHES = 1 / INCHES_TO_METERS
@@ -1013,37 +1024,11 @@ export function shouldAdoptWallLessRoofLevel(
   targetLevelId: string,
   roofLevel: SceneNodeLike,
 ): boolean {
-  const targetLevel = nodes[targetLevelId]
-  if (!targetLevel) return false
-  if (
-    typeof targetLevel.parentId === 'string' &&
-    typeof roofLevel.parentId === 'string' &&
-    targetLevel.parentId !== roofLevel.parentId
-  ) {
-    return false
-  }
-  const allValues = Object.values(nodes)
-  const roofLevelHasWalls = allValues.some(
-    (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, roofLevel.id),
+  return kernelShouldAdoptWallLessRoofLevel(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    targetLevelId,
+    roofLevel as KernelSceneNodeLike,
   )
-  if (roofLevelHasWalls) return false
-
-  const roofOrder = levelSortOrder(roofLevel)
-  const siblingWalledLevels = allValues
-    .filter(
-      (n) =>
-        n.type === 'level' &&
-        n.id !== roofLevel.id &&
-        n.parentId === roofLevel.parentId &&
-        allValues.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id)),
-    )
-    .sort((a, b) => levelSortOrder(a) - levelSortOrder(b))
-
-  if (siblingWalledLevels.length === 0) return false
-  const belowRoof = siblingWalledLevels.filter((l) => levelSortOrder(l) <= roofOrder)
-  const hostLevel =
-    belowRoof.length > 0 ? belowRoof[belowRoof.length - 1]! : siblingWalledLevels[siblingWalledLevels.length - 1]!
-  return hostLevel.id === targetLevelId
 }
 
 /**
@@ -1062,63 +1047,15 @@ export function shouldAdoptRoofSegmentOntoLevel(
   halfX: number,
   halfZ: number,
 ): boolean {
-  const targetLevel = nodes[targetLevelId]
-  if (!targetLevel) return false
-  if (
-    typeof targetLevel.parentId === 'string' &&
-    typeof roofLevel.parentId === 'string' &&
-    targetLevel.parentId !== roofLevel.parentId
-  ) {
-    return false
-  }
-  const allValues = Object.values(nodes)
-  const roofLevelHasWalls = allValues.some(
-    (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, roofLevel.id),
+  return kernelShouldAdoptRoofSegmentOntoLevel(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    targetLevelId,
+    roofLevel as KernelSceneNodeLike,
+    segCenterX,
+    segCenterZ,
+    halfX,
+    halfZ,
   )
-  if (roofLevelHasWalls) return false
-
-  const roofOrder = levelSortOrder(roofLevel)
-  const padM = 0.8
-  const minX = segCenterX - halfX - padM
-  const maxX = segCenterX + halfX + padM
-  const minZ = segCenterZ - halfZ - padM
-  const maxZ = segCenterZ + halfZ + padM
-
-  const siblingWalledLevels = allValues
-    .filter(
-      (n) =>
-        n.type === 'level' &&
-        n.id !== roofLevel.id &&
-        n.parentId === roofLevel.parentId &&
-        allValues.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id)),
-    )
-    .sort((a, b) => levelSortOrder(a) - levelSortOrder(b))
-
-  if (siblingWalledLevels.length === 0) return false
-  const belowRoof = siblingWalledLevels.filter((l) => levelSortOrder(l) <= roofOrder)
-  const candidates = belowRoof.length > 0 ? belowRoof : siblingWalledLevels
-
-  const overlapping = candidates.filter((lvl) =>
-    allValues.some((w) => {
-      if (w.type !== 'wall' || w.visible === false || !Array.isArray(w.start) || !Array.isArray(w.end)) return false
-      if (!belongsToLevel(nodes, w, lvl.id)) return false
-      return segmentIntersectsAabb2D(
-        Number(w.start[0]),
-        Number(w.start[1]),
-        Number(w.end[0]),
-        Number(w.end[1]),
-        minX,
-        maxX,
-        minZ,
-        maxZ,
-      )
-    }),
-  )
-
-  if (overlapping.length > 0) {
-    return overlapping[overlapping.length - 1]!.id === targetLevelId
-  }
-  return shouldAdoptWallLessRoofLevel(nodes, targetLevelId, roofLevel)
 }
 
 export function isCommercialRtuEquipment(node: SceneNodeLike): boolean {
@@ -1294,20 +1231,11 @@ export function belongsToLevel(
   node: SceneNodeLike,
   levelId: string | null,
 ): boolean {
-  if (!levelId) return true
-  if (node.type === 'level') return node.id === levelId
-  if (node.parentId === levelId) return true
-  let cur: SceneNodeLike | undefined = node
-  const seen = new Set<string>()
-  while (cur?.parentId && !seen.has(cur.id)) {
-    if (cur.parentId === levelId) return true
-    seen.add(cur.id)
-    const parent: SceneNodeLike | undefined = nodes[cur.parentId]
-    if (!parent) return false
-    if (parent.type === 'level') return parent.id === levelId
-    cur = parent
-  }
-  return false
+  return kernelBelongsToLevel(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    node as KernelSceneNodeLike,
+    levelId,
+  )
 }
 
 /**
@@ -1318,17 +1246,10 @@ export function resolveNodeLevelId(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   node: SceneNodeLike,
 ): string | null {
-  if (node.type === 'level') return node.id
-  let cur: SceneNodeLike | undefined = node
-  const seen = new Set<string>()
-  while (cur?.parentId && !seen.has(cur.id)) {
-    seen.add(cur.id)
-    const parent: SceneNodeLike | undefined = nodes[cur.parentId]
-    if (!parent) return cur.parentId
-    if (parent.type === 'level') return parent.id
-    cur = parent
-  }
-  return null
+  return kernelResolveNodeLevelId(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    node as KernelSceneNodeLike,
+  )
 }
 
 /** True when both nodes belong to the same level, or at least one is unscoped (flat single-level scene). */
@@ -1339,9 +1260,7 @@ export function sameLevelOrUnscoped(levelA: string | null, levelB: string | null
 
 /** Sort key for ordering sibling building levels from lowest to highest story. */
 export function levelSortOrder(level: SceneNodeLike): number {
-  if (typeof level.level === 'number' && Number.isFinite(level.level)) return level.level
-  if (typeof level.elevation === 'number' && Number.isFinite(level.elevation)) return level.elevation
-  return 0
+  return kernelLevelSortOrder(level as KernelSceneNodeLike)
 }
 
 /**
@@ -1353,23 +1272,10 @@ export function isHighestWalledLevelInBuilding(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
 ): boolean {
-  if (!levelId) return true
-  const target = nodes[levelId]
-  if (!target || target.type !== 'level') return true
-  const targetOrder = levelSortOrder(target)
-  const targetParent = typeof target.parentId === 'string' ? target.parentId : null
-  const all = Object.values(nodes)
-  for (const n of all) {
-    if (n.type !== 'level' || n.id === levelId) continue
-    const nParent = typeof n.parentId === 'string' ? n.parentId : null
-    if (targetParent && nParent && nParent !== targetParent) continue
-    if (levelSortOrder(n) <= targetOrder) continue
-    const hasWalls = all.some(
-      (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id),
-    )
-    if (hasWalls) return false
-  }
-  return true
+  return kernelIsHighestWalledLevelInBuilding(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    levelId,
+  )
 }
 
 /**
@@ -1381,21 +1287,9 @@ export function isLowestWalledLevelInBuilding(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null,
 ): boolean {
-  if (!levelId) return true
-  const target = nodes[levelId]
-  if (!target || target.type !== 'level') return true
-  const targetOrder = levelSortOrder(target)
-  const targetParent = typeof target.parentId === 'string' ? target.parentId : null
-  const all = Object.values(nodes)
-  for (const n of all) {
-    if (n.type !== 'level' || n.id === levelId) continue
-    const nParent = typeof n.parentId === 'string' ? n.parentId : null
-    if (targetParent && nParent && nParent !== targetParent) continue
-    if (levelSortOrder(n) >= targetOrder) continue
-    const hasWalls = all.some(
-      (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id),
-    )
-    if (hasWalls) return false
-  }
-  return true
+  return kernelIsGroundOrLowestWalledLevel(
+    nodes as Readonly<Record<string, KernelSceneNodeLike>>,
+    levelId,
+    { excludeBasements: false, includeHiddenWalls: false },
+  )
 }

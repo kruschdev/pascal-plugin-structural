@@ -3,7 +3,9 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
+import { evaluatePlacementCandidate } from '@kruschdev/pascal-mep-kernel'
 import { extractWallOpenings } from './openings'
+import { IRC_WIND_SEISMIC_THRESHOLDS, getIrcRuleById, isHighSeismicCategory } from './rules'
 import { selectHoldDownSku } from './sizing'
 import {
   DEFAULT_DESIGN_PARAMS,
@@ -104,10 +106,7 @@ export function evaluateBracedWallLines(params: {
     seismicCategory: design.seismicCategory,
     storiesAbove: design.storiesAbove,
   })
-  const requiresPlateWashers =
-    design.seismicCategory === 'D0' ||
-    design.seismicCategory === 'D1' ||
-    design.seismicCategory === 'D2'
+  const requiresPlateWashers = isHighSeismicCategory(design.seismicCategory)
 
   type WallEntry = {
     wall: SceneNodeLike
@@ -239,7 +238,8 @@ export function evaluateBracedWallLines(params: {
         const wspFt = wspM * METERS_TO_FEET
         const portalFt = (wspM + portalExtraM) * METERS_TO_FEET
         const wspPercent = totalFt > 0 ? Math.min(100, Math.round((wspFt / totalFt) * 100)) : 0
-        const highLateral = design.windMph >= 130 || requiresPlateWashers
+        const highLateral =
+          design.windMph >= IRC_WIND_SEISMIC_THRESHOLDS.holdDownWindMph || requiresPlateWashers
 
         // Credit WSP piers (>=48") by default; only credit up to 4 CS-PF (16"-48") portal frames when adjacent to openings
         const usesPortal = wspPercent < requiredPercent && portalExtraM > 0
@@ -350,7 +350,10 @@ export function evaluateBracedWallLines(params: {
       // parallel braced wall lines within max BWL spacing (60 ft / 18.29m SDC A-C; 35 ft / 10.67m high-lateral)
       // are not independently required shear lines. Never waive stepped exterior walls or lines lacking
       // overlapping passing parallel braced lines on both sides.
-      const maxBwlSpacingM = design.windMph >= 130 || requiresPlateWashers ? 10.67 : 18.29
+      const maxBwlSpacingM =
+        design.windMph >= IRC_WIND_SEISMIC_THRESHOLDS.holdDownWindMph || requiresPlateWashers
+          ? 10.67
+          : 18.29
       const overlapsProj = (a: { minProj: number; maxProj: number }, b: { minProj: number; maxProj: number }) =>
         Math.min(a.maxProj, b.maxProj) - Math.max(a.minProj, b.minProj) > 0.1
       if (axisReports.length >= 3) {
@@ -510,10 +513,23 @@ export function traceStructuralLoadPaths(params: {
   }
 
   // 2. Check every column's load transfer down to a verified lower column or pad footing
+  const windSeismicRule = getIrcRuleById('irc-r802-11-wind-seismic-uplift')
   for (const col of columns) {
     const pos = col.position ?? [0, 0, 0]
     const load = typeof col.axialLoadLbs === 'number' ? col.axialLoadLbs : 4500
-    const hasFooting = typeof col.footingWidthIn === 'number' && col.footingWidthIn >= 18
+    const hasFooting =
+      typeof col.footingWidthIn === 'number' &&
+      Number.isFinite(col.footingWidthIn) &&
+      evaluatePlacementCandidate(
+        [windSeismicRule],
+        {
+          id: col.id,
+          kind: 'structural:column',
+          pos: [pos[0], pos[1], pos[2]],
+          footingWidthIn: col.footingWidthIn,
+        },
+        'audit',
+      ).legal
     const targetId = typeof col.transfersToNodeId === 'string' ? col.transfersToNodeId : ''
     const isFootingTarget = targetId.startsWith('footing_') || targetId.startsWith('footing:')
     const hasVerifiedTarget = isFootingTarget
@@ -549,16 +565,51 @@ export function traceStructuralLoadPaths(params: {
   const hasStraps = connectors.some((c) => c.category === 'tension-strap' || c.category === 'framing-angle')
   const hasHoldDowns = connectors.some((c) => isHoldDownConnector(c))
 
-  if (design.windMph >= 115 && !hasRoofTies && assemblies.length > 0) {
+  if (
+    assemblies.length > 0 &&
+    !evaluatePlacementCandidate(
+      [windSeismicRule],
+      {
+        kind: 'structural:assembly',
+        pos: [0, 0, 0],
+        designWindMph: design.windMph,
+        hasRoofTie: hasRoofTies,
+      },
+      'audit',
+    ).legal
+  ) {
     upliftFindings.push(`Wind ${design.windMph} mph requires roof-to-wall hurricane ties (H2.5A/H10A, IRC R802.11).`)
   }
-  if (design.windMph >= 130 && !hasStraps && hasStructure) {
-    upliftFindings.push(`High wind (>=130 mph) requires continuous wall/floor uplift straps (MSTA36/CS16, WFCM).`)
+  if (
+    hasStructure &&
+    !evaluatePlacementCandidate(
+      [windSeismicRule],
+      {
+        kind: 'structural:assembly',
+        pos: [0, 0, 0],
+        designWindMph: design.windMph,
+        hasStrap: hasStraps,
+      },
+      'audit',
+    ).legal
+  ) {
+    upliftFindings.push(
+      `High wind (>=${IRC_WIND_SEISMIC_THRESHOLDS.strapWindMph} mph) requires continuous wall/floor uplift straps (MSTA36/CS16, WFCM).`,
+    )
   }
   if (
-    (design.seismicCategory === 'D0' || design.seismicCategory === 'D1' || design.seismicCategory === 'D2' || design.windMph >= 130) &&
-    !hasHoldDowns &&
-    hasStructure
+    hasStructure &&
+    !evaluatePlacementCandidate(
+      [windSeismicRule],
+      {
+        kind: 'structural:assembly',
+        pos: [0, 0, 0],
+        designWindMph: design.windMph,
+        seismicDesignCategory: design.seismicCategory,
+        hasHoldDown: hasHoldDowns,
+      },
+      'audit',
+    ).legal
   ) {
     upliftFindings.push(`SDC ${design.seismicCategory} / ${design.windMph} mph wind requires foundation hold-downs (HDU/STHD14).`)
   }
