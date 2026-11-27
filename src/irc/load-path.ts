@@ -3,9 +3,17 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
-import { evaluatePlacementCandidate } from '@kruschdev/pascal-mep-kernel'
-import { extractWallOpenings } from './openings'
-import { IRC_WIND_SEISMIC_THRESHOLDS, getIrcRuleById, isHighSeismicCategory } from './rules'
+import {
+  type CanonicalWall,
+  type SceneNodeLike as KernelSceneNodeLike,
+  compileBuildingAnatomy,
+} from '@kruschdev/pascal-mep-kernel'
+import { extractWallOpenings, normalizeCanonicalWallOpenings, resolveWallHeightM } from './openings'
+import {
+  IRC_WIND_SEISMIC_THRESHOLDS,
+  evaluateIrcWindSeismicCandidate,
+  isHighSeismicCategory,
+} from './rules'
 import { selectHoldDownSku } from './sizing'
 import {
   DEFAULT_DESIGN_PARAMS,
@@ -122,6 +130,12 @@ export function evaluateBracedWallLines(params: {
     portalIntervalsM: Array<[number, number]>
   }
 
+  const anatomy = compileBuildingAnatomy(params.nodes as Readonly<Record<string, KernelSceneNodeLike>>)
+  const canonicalWallsById = new Map<string, CanonicalWall>()
+  for (const cw of anatomy.getWalls(params.levelId ?? null)) {
+    canonicalWallsById.set(cw.id, cw)
+  }
+
   const entries: WallEntry[] = []
   for (const w of walls) {
     const start = w.start!
@@ -140,7 +154,12 @@ export function evaluateBracedWallLines(params: {
     const projAt = (u: number): number => (axis === 'X' ? start[0] + ux * u : start[1] + uz * u)
 
     // Split wall into real continuous solid pier intervals around child doors/windows (both native & Pascal `item` openings)
-    const childOpenings = extractWallOpenings(params.nodes, w)
+    const canonicalWall = canonicalWallsById.get(w.id)
+    const childOpenings = canonicalWall
+      ? normalizeCanonicalWallOpenings(canonicalWall.openings, lenM, resolveWallHeightM(params.nodes, w, 2.55))
+      : w.visible === false
+        ? extractWallOpenings(params.nodes, w)
+        : []
     const cuts: Array<[number, number]> = childOpenings.map((o) => [
       Math.max(0, o.uCenterM - o.widthM / 2),
       Math.min(lenM, o.uCenterM + o.widthM / 2),
@@ -513,15 +532,13 @@ export function traceStructuralLoadPaths(params: {
   }
 
   // 2. Check every column's load transfer down to a verified lower column or pad footing
-  const windSeismicRule = getIrcRuleById('irc-r802-11-wind-seismic-uplift')
   for (const col of columns) {
     const pos = col.position ?? [0, 0, 0]
     const load = typeof col.axialLoadLbs === 'number' ? col.axialLoadLbs : 4500
     const hasFooting =
       typeof col.footingWidthIn === 'number' &&
       Number.isFinite(col.footingWidthIn) &&
-      evaluatePlacementCandidate(
-        [windSeismicRule],
+      evaluateIrcWindSeismicCandidate(
         {
           id: col.id,
           kind: 'structural:column',
@@ -567,40 +584,41 @@ export function traceStructuralLoadPaths(params: {
 
   if (
     assemblies.length > 0 &&
-    !evaluatePlacementCandidate(
-      [windSeismicRule],
+    !evaluateIrcWindSeismicCandidate(
       {
         kind: 'structural:assembly',
         pos: [0, 0, 0],
         designWindMph: design.windMph,
+        seismicDesignCategory: design.seismicCategory,
         hasRoofTie: hasRoofTies,
       },
       'audit',
     ).legal
   ) {
-    upliftFindings.push(`Wind ${design.windMph} mph requires roof-to-wall hurricane ties (H2.5A/H10A, IRC R802.11).`)
+    upliftFindings.push(
+      `Wind ${design.windMph} mph / SDC ${design.seismicCategory} requires roof-to-wall hurricane ties (H2.5A/H10A, IRC R802.11).`,
+    )
   }
   if (
     hasStructure &&
-    !evaluatePlacementCandidate(
-      [windSeismicRule],
+    !evaluateIrcWindSeismicCandidate(
       {
         kind: 'structural:assembly',
         pos: [0, 0, 0],
         designWindMph: design.windMph,
+        seismicDesignCategory: design.seismicCategory,
         hasStrap: hasStraps,
       },
       'audit',
     ).legal
   ) {
     upliftFindings.push(
-      `High wind (>=${IRC_WIND_SEISMIC_THRESHOLDS.strapWindMph} mph) requires continuous wall/floor uplift straps (MSTA36/CS16, WFCM).`,
+      `High wind (>=${IRC_WIND_SEISMIC_THRESHOLDS.strapWindMph} mph) or SDC ${design.seismicCategory} requires continuous wall/floor uplift straps (MSTA36/CS16, WFCM).`,
     )
   }
   if (
     hasStructure &&
-    !evaluatePlacementCandidate(
-      [windSeismicRule],
+    !evaluateIrcWindSeismicCandidate(
       {
         kind: 'structural:assembly',
         pos: [0, 0, 0],

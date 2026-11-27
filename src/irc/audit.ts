@@ -4,12 +4,12 @@
  */
 
 import {
-  type CanonicalRoofSegment,
   type SceneNodeLike as KernelSceneNodeLike,
+  compileLevelRoofShell,
   distancePointToSegment2D,
+  evaluatePlacementCandidate,
   evaluateRoofSegmentSurfaceY,
   extractBeamPrism,
-  extractCanonicalRoofSegments,
   extractColumnPrism,
   resolveMepRunExtents as kernelResolveMepRunExtents,
   segmentIntersectsOrientedPrismY,
@@ -100,7 +100,15 @@ export function segmentIntersectsBeam(
   beamDepthM: number,
   mepExtents: number | MepRunExtents = 0.025,
 ): boolean {
-  if (beamWidthM <= 0 || beamDepthM <= 0) return false
+  if (
+    !Number.isFinite(beamY) ||
+    !Number.isFinite(beamWidthM) ||
+    !Number.isFinite(beamDepthM) ||
+    beamWidthM <= 0 ||
+    beamDepthM <= 0
+  ) {
+    return false
+  }
   const prism = extractBeamPrism({
     id: '__beam__',
     type: 'structural:beam',
@@ -113,6 +121,7 @@ export function segmentIntersectsBeam(
   if (!prism) return false
   const halfXZ = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfXZ
   const halfY = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfY
+  if (!Number.isFinite(halfXZ) || !Number.isFinite(halfY)) return false
   return segmentIntersectsOrientedPrismY(a, b, prism, [halfXZ, halfY, halfXZ])
 }
 
@@ -131,7 +140,17 @@ export function segmentIntersectsColumn(
   rotationY = 0,
   mepExtents: number | MepRunExtents = 0.025,
 ): boolean {
-  if (heightM <= 1e-4 || widthM <= 1e-4 || depthM <= 1e-4) return false
+  if (
+    !Number.isFinite(heightM) ||
+    !Number.isFinite(widthM) ||
+    !Number.isFinite(depthM) ||
+    !Number.isFinite(rotationY) ||
+    heightM <= 1e-4 ||
+    widthM <= 1e-4 ||
+    depthM <= 1e-4
+  ) {
+    return false
+  }
   const prism = extractColumnPrism({
     id: '__column__',
     type: 'structural:column',
@@ -144,6 +163,7 @@ export function segmentIntersectsColumn(
   if (!prism) return false
   const halfXZ = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfXZ
   const halfY = typeof mepExtents === 'number' ? mepExtents : mepExtents.halfY
+  if (!Number.isFinite(halfXZ) || !Number.isFinite(halfY)) return false
   return segmentIntersectsOrientedPrismY(a, b, prism, [halfXZ, halfY, halfXZ])
 }
 
@@ -528,39 +548,73 @@ export function auditStructuralScene(
 
   // 6. Priority #1 Structural Right-of-Way: detect MEP runs boring through structural beams & columns (strictly per level)!
   const mepRightOfWayRule = getIrcRuleById('irc-r502-8-mep-right-of-way')
-  const beamPrisms = beams.map((beam) => ({
-    beam,
-    levelId: resolveNodeLevelId(nodes, beam),
-    prism:
-      (typeof beam.widthIn === 'number' && beam.widthIn <= 0) ||
-      (typeof beam.depthIn === 'number' && beam.depthIn <= 0)
-        ? null
-        : extractBeamPrism({
-            ...(beam as KernelSceneNodeLike),
-            start: (beam.start as Vec2 | undefined) ?? [0, 0],
-            end: (beam.end as Vec2 | undefined) ?? [1, 0],
-            elevationY: typeof beam.elevationY === 'number' ? beam.elevationY : 2.4,
-            widthIn: typeof beam.widthIn === 'number' ? beam.widthIn : 3.5,
-            depthIn: typeof beam.depthIn === 'number' ? beam.depthIn : 11.875,
-          }),
-  }))
+  const isPositiveFinite = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0
+  const isInvalidDim = (v: unknown): boolean =>
+    typeof v === 'number' && (!Number.isFinite(v) || v <= 0)
+
+  const beamPrisms = beams.map((beam) => {
+    const invalidDim =
+      isInvalidDim(beam.widthIn) ||
+      isInvalidDim(beam.depthIn) ||
+      (beam.widthIn === undefined && isInvalidDim(beam.width)) ||
+      (beam.depthIn === undefined && isInvalidDim(beam.height))
+    const has3DStart =
+      Array.isArray(beam.start) &&
+      beam.start.length >= 3 &&
+      typeof beam.start[1] === 'number' &&
+      Number.isFinite(beam.start[1]) &&
+      typeof beam.start[2] === 'number' &&
+      Number.isFinite(beam.start[2])
+    const hasExplicitElev =
+      (typeof beam.elevationY === 'number' && Number.isFinite(beam.elevationY)) ||
+      (typeof beam.elevation === 'number' && Number.isFinite(beam.elevation)) ||
+      has3DStart
+    const beamForPrism: KernelSceneNodeLike = {
+      ...(beam as KernelSceneNodeLike),
+      start: (beam.start as Vec2 | Vec3 | undefined) ?? [0, 0],
+      end: (beam.end as Vec2 | Vec3 | undefined) ?? [1, 0],
+      ...(hasExplicitElev ? {} : { elevationY: 2.4 }),
+      ...(isPositiveFinite(beam.widthIn) || isPositiveFinite(beam.width) ? {} : { widthIn: 3.5 }),
+      ...(isPositiveFinite(beam.depthIn) || isPositiveFinite(beam.height) ? {} : { depthIn: 11.875 }),
+    }
+    return {
+      beam,
+      levelId: resolveNodeLevelId(nodes, beam),
+      prism: invalidDim ? null : extractBeamPrism(beamForPrism),
+    }
+  })
   const columnPrisms = columns.map((col) => {
-    const wM = (typeof col.widthIn === 'number' ? col.widthIn : 5.5) * INCHES_TO_METERS
-    const dM = (typeof col.depthIn === 'number' ? col.depthIn : 5.5) * INCHES_TO_METERS
-    const hM = typeof col.heightM === 'number' ? col.heightM : 2.7432
+    const hasExplicitH = isPositiveFinite(col.heightM) || isPositiveFinite(col.height)
+    const wIn = typeof col.widthIn === 'number' ? col.widthIn : 5.5
+    const dIn = typeof col.depthIn === 'number' ? col.depthIn : 5.5
+    const hM = isPositiveFinite(col.heightM)
+      ? col.heightM
+      : isPositiveFinite(col.height)
+        ? col.height
+        : col.heightM !== undefined
+          ? Number(col.heightM)
+          : col.height !== undefined
+            ? Number(col.height)
+            : 2.7432
+    const wM = wIn * INCHES_TO_METERS
+    const dM = dIn * INCHES_TO_METERS
+    const invalidDim =
+      !Number.isFinite(hM) ||
+      !Number.isFinite(wM) ||
+      !Number.isFinite(dM) ||
+      hM <= 1e-4 ||
+      wM <= 1e-4 ||
+      dM <= 1e-4
+    const colForPrism: KernelSceneNodeLike = {
+      ...(col as KernelSceneNodeLike),
+      position: (col.position as Vec3 | undefined) ?? [0, 0, 0],
+      ...(hasExplicitH ? {} : { heightM: 2.7432 }),
+    }
     return {
       col,
       levelId: resolveNodeLevelId(nodes, col),
-      prism:
-        hM <= 1e-4 || wM <= 1e-4 || dM <= 1e-4
-          ? null
-          : extractColumnPrism({
-              ...(col as KernelSceneNodeLike),
-              position: (col.position as Vec3 | undefined) ?? [0, 0, 0],
-              widthIn: wM / INCHES_TO_METERS,
-              depthIn: dM / INCHES_TO_METERS,
-              heightM: hM,
-            }),
+      prism: invalidDim ? null : extractColumnPrism(colForPrism, 2.7432),
     }
   })
 
@@ -617,39 +671,6 @@ export function auditStructuralScene(
   const isMainDwvVentStack = (n: SceneNodeLike): boolean =>
     Boolean(n.isMainVentStack) || /Main DWV Soil & Vent Stack|Through Roof/i.test(String(n.name ?? ''))
 
-  const evalAuditRoofSurfaceY = (
-    x: number,
-    z: number,
-    roofSegs: readonly CanonicalRoofSegment[],
-    bounds: { minX: number; maxX: number; minZ: number; maxZ: number },
-    baseY: number,
-    wallH: number,
-    pitchRiseOver12: number,
-    isFlatCommercialRoof: boolean,
-  ): number => {
-    if (isFlatCommercialRoof) {
-      return baseY + wallH + 0.2858
-    }
-    if (roofSegs.length > 0) {
-      let bestY: number | null = null
-      for (const seg of roofSegs) {
-        const sy = evaluateRoofSegmentSurfaceY(seg, x, z, {
-          clampOverhangToEave: true,
-          footprintPadM: 0.15,
-        })
-        if (sy !== null && (bestY === null || sy > bestY)) bestY = sy
-      }
-      if (bestY !== null) return bestY
-    }
-    const spanX = bounds.maxX - bounds.minX
-    const spanZ = bounds.maxZ - bounds.minZ
-    const ridgeAlongX = spanX >= spanZ
-    const halfSpan = (ridgeAlongX ? spanZ : spanX) / 2
-    const center = ridgeAlongX ? (bounds.minZ + bounds.maxZ) / 2 : (bounds.minX + bounds.maxX) / 2
-    const distFromRidge = Math.abs((ridgeAlongX ? z : x) - center)
-    return baseY + wallH + Math.max(0, halfSpan - distFromRidge) * (pitchRiseOver12 / 12)
-  }
-
   for (const { lvlId, scopeNodes } of auditPasses) {
     const lvlScopedNodes = Object.values(scopeNodes).filter((n) => belongsToLevel(scopeNodes, n, lvlId))
     const lvlWalls = lvlScopedNodes.filter(
@@ -695,16 +716,50 @@ export function auditStructuralScene(
       typeof lvlAsm?.roofPitchRise === 'number' && Number.isFinite(lvlAsm.roofPitchRise)
         ? lvlAsm.roofPitchRise
         : 6
-    const levelRoofSegs: CanonicalRoofSegment[] = isTopWalledLevel
-      ? extractCanonicalRoofSegments(
+    const roofShell = isTopWalledLevel
+      ? compileLevelRoofShell(
           nodes as Readonly<Record<string, KernelSceneNodeLike>>,
           lvlId,
           wallH,
-          { includeHidden: true, levelBaseY: baseY },
-        ).filter((seg) => seg.eaveY >= baseY + wallH - 0.6)
-      : []
+          {
+            includeHidden: true,
+            levelBaseY: baseY,
+            wallBounds: bounds,
+            fallbackPitchRiseOver12: pitchRise,
+            clampOverhangToEave: true,
+            footprintPadM: 0.15,
+          },
+        )
+      : null
+    const upperRoofSegs = (roofShell?.segments ?? []).filter((seg) => seg.eaveY >= baseY + wallH - 0.6)
+    const hasUpperRoofSegs = upperRoofSegs.length > 0
     const hasCommercialRtu = findLevelCommercialRtus(nodes, lvlId).length > 0
-    const isFlatCommercialRoof = hasCommercialRtu && levelRoofSegs.length === 0
+    const isFlatCommercialRoof = hasCommercialRtu && !hasUpperRoofSegs
+    const syntheticRoofShell =
+      isTopWalledLevel && !isFlatCommercialRoof
+        ? compileLevelRoofShell({}, null, wallH, {
+            levelBaseY: baseY,
+            wallBounds: bounds,
+            fallbackPitchRiseOver12: pitchRise,
+            clampOverhangToEave: true,
+            footprintPadM: 0.15,
+          })
+        : null
+    const evalAuditRoofSurfaceY = (x: number, z: number): number => {
+      if (isFlatCommercialRoof) return baseY + wallH + 0.2858
+      if (upperRoofSegs.length > 0) {
+        let bestY: number | null = null
+        for (const seg of upperRoofSegs) {
+          const sy = evaluateRoofSegmentSurfaceY(seg, x, z, {
+            clampOverhangToEave: true,
+            footprintPadM: 0.15,
+          })
+          if (sy !== null && (bestY === null || sy > bestY)) bestY = sy
+        }
+        if (bestY !== null) return bestY
+      }
+      return syntheticRoofShell ? syntheticRoofShell.roofEnvelopeY(x, z) : baseY + wallH
+    }
 
     for (const n of lvlScopedNodes) {
       if (n.visible === false) continue
@@ -737,18 +792,19 @@ export function auditStructuralScene(
           pos[2] <= bounds.maxZ + 0.15
 
         if (isTopWalledLevel && insideBounds && topY > baseY + wallH + IRC_ROOF_ENVELOPE_THRESHOLDS.atticThresholdOffsetM) {
-          const roofY = evalAuditRoofSurfaceY(
-            pos[0],
-            pos[2],
-            levelRoofSegs,
-            bounds,
-            baseY,
-            wallH,
-            pitchRise,
-            isFlatCommercialRoof,
+          const roofY = evalAuditRoofSurfaceY(pos[0], pos[2])
+          const roofEval = evaluatePlacementCandidate(
+            [roofEnvelopeRule],
+            {
+              id: n.id,
+              kind: t,
+              pos: [pos[0], topY, pos[2]],
+              roofSurfaceYM: roofY,
+            },
+            'audit',
           )
           const excess = topY - roofY
-          if (excess > IRC_ROOF_ENVELOPE_THRESHOLDS.warningProtrusionM) {
+          if (!roofEval.legal) {
             push({
               severity: excess > IRC_ROOF_ENVELOPE_THRESHOLDS.errorProtrusionM ? 'error' : 'warning',
               category: 'mep-clash',
@@ -809,25 +865,27 @@ export function auditStructuralScene(
                 pz >= bounds.minZ - 0.1 &&
                 pz <= bounds.maxZ + 0.1
               if (!insideXZ || py + halfY <= baseY + wallH + IRC_ROOF_ENVELOPE_THRESHOLDS.atticThresholdOffsetM) continue
-              const roofY = evalAuditRoofSurfaceY(
-                px,
-                pz,
-                levelRoofSegs,
-                bounds,
-                baseY,
-                wallH,
-                pitchRise,
-                isFlatCommercialRoof,
+              const roofY = evalAuditRoofSurfaceY(px, pz)
+              const topY = py + halfY
+              const roofEval = evaluatePlacementCandidate(
+                [roofEnvelopeRule],
+                {
+                  id: n.id,
+                  kind: t,
+                  pos: [px, topY, pz],
+                  roofSurfaceYM: roofY,
+                },
+                'audit',
               )
-              const excess = py + halfY - roofY
-              if (excess > IRC_ROOF_ENVELOPE_THRESHOLDS.warningProtrusionM) {
+              const excess = topY - roofY
+              if (!roofEval.legal) {
                 roofHitLogged = true
                 push({
                   severity: excess > IRC_ROOF_ENVELOPE_THRESHOLDS.errorProtrusionM ? 'error' : 'warning',
                   category: 'mep-clash',
                   codeRef: roofEnvelopeRule.codeRef,
                   nodeId: n.id,
-                  message: `MEP run "${n.name ?? n.id}" (${t}) top (${(py + halfY).toFixed(2)}m) protrudes +${excess.toFixed(2)}m above the roof framing plane (${roofY.toFixed(2)}m) at (${px.toFixed(2)}, ${pz.toFixed(2)}).`,
+                  message: `MEP run "${n.name ?? n.id}" (${t}) top (${topY.toFixed(2)}m) protrudes +${excess.toFixed(2)}m above the roof framing plane (${roofY.toFixed(2)}m) at (${px.toFixed(2)}, ${pz.toFixed(2)}).`,
                   remediation:
                     'Drop the MEP run below the ceiling joists or route centrally inside the attic volume beneath the roof rafters.',
                 })

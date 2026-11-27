@@ -43,6 +43,7 @@ const IRC_WIND_SEISMIC_UPLIFT_RULE: WindSeismicThresholdRule = {
     highSeismicCategories: ['D0', 'D1', 'D2'],
     sillBoltSeismicCategories: ['C', 'D0', 'D1', 'D2'],
     minFootingWidthIn: 18,
+    minBearingLengthIn: 1.5,
     minBearingToleranceIn: 0.05,
   },
 }
@@ -57,7 +58,9 @@ const IRC_ROOF_FRAMING_ENVELOPE_RULE: ElevationBandRule = {
   title: 'Roof Framing Plane & Building Envelope Intrusion Tolerance',
   suggestedFix:
     'Lower indoor MEP equipment/plenums or drop ducts, pipes, and conduits below the ceiling/rafter framing plane inside the conditioned building envelope.',
-  placementMarginM: 0.07, // 0.08m warning + 0.07m placement cushion = 0.15m error threshold
+  // Audit allows up to +0.08m above roof plane (`roofMarginM: -0.08` => `y <= roofSurfaceYM + 0.08`),
+  // while placement enforces 0.08m clearance below the roof plane (`-0.08 + 0.16 = +0.08` => `y <= roofSurfaceYM - 0.08`).
+  placementMarginM: 0.16,
   params: {
     targetKinds: [
       'hvac:equipment',
@@ -67,8 +70,7 @@ const IRC_ROOF_FRAMING_ENVELOPE_RULE: ElevationBandRule = {
       'plumbing:pipe-run',
       'electrical:conduit-run',
     ],
-    roofMarginM: 0.08,
-    atticThresholdOffsetM: 0.05,
+    roofMarginM: -0.08,
   },
 }
 
@@ -131,9 +133,10 @@ export const IRC_WIND_SEISMIC_THRESHOLDS: WindSeismicThresholdParams =
   getIrcRuleById('irc-r802-11-wind-seismic-uplift').params
 
 const roofEnvelopeRule = getIrcRuleById('irc-r802-roof-framing-envelope')
-const roofWarningMarginM = roofEnvelopeRule.params.roofMarginM ?? 0.08
-const roofErrorMarginM = Number(
-  (roofWarningMarginM + (roofEnvelopeRule.placementMarginM ?? 0.07)).toFixed(3),
+const roofSignedMarginM = roofEnvelopeRule.params.roofMarginM ?? -0.08
+const roofWarningProtrusionM = Number(Math.max(0, -roofSignedMarginM).toFixed(3))
+const roofPlacementClearanceM = Number(
+  (roofSignedMarginM + (roofEnvelopeRule.placementMarginM ?? 0.16)).toFixed(3),
 )
 
 /**
@@ -141,14 +144,16 @@ const roofErrorMarginM = Number(
  * derived directly from `irc-r802-roof-framing-envelope`.
  */
 export const IRC_ROOF_ENVELOPE_THRESHOLDS = Object.freeze({
-  /** Warning protrusion threshold above roof framing plane (m), from `roofMarginM`. */
-  roofMarginM: roofWarningMarginM,
-  /** Warning protrusion threshold above roof framing plane (m). */
-  warningProtrusionM: roofWarningMarginM,
-  /** Error protrusion threshold above roof framing plane (m), `roofMarginM + placementMarginM` (`0.15m`). */
-  errorProtrusionM: roofErrorMarginM,
-  /** Vertical offset above wall top plate before roof-plane checks engage (m). */
-  atticThresholdOffsetM: roofEnvelopeRule.params.atticThresholdOffsetM ?? 0.05,
+  /** Signed roof framing margin from `irc-r802-roof-framing-envelope` (`-0.08m` = +0.08m audit protrusion tolerance). */
+  roofMarginM: roofSignedMarginM,
+  /** Placement clearance below roof framing plane (`roofMarginM + placementMarginM` = `0.08m`). */
+  placementClearanceM: roofPlacementClearanceM,
+  /** Warning protrusion threshold above roof framing plane (m), derived from `-roofMarginM` (`0.08m`). */
+  warningProtrusionM: roofWarningProtrusionM,
+  /** Error protrusion threshold above roof framing plane (m), decoupled from `placementMarginM` (`0.15m`). */
+  errorProtrusionM: 0.15,
+  /** Audit-only lower engagement gate above wall top plate before roof-plane checks run (m). */
+  atticThresholdOffsetM: 0.05,
   /** Exterior wall overhang warning threshold (m) for indoor equipment. */
   equipmentExteriorWarningM: 0.15,
   /** Exterior wall overhang error threshold (m) for indoor equipment. */

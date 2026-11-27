@@ -54,13 +54,15 @@ describe('Kernel Layer 2/3 Adoption — Single-Source Declarative IRC Rule Engin
       highSeismicCategories: ['D0', 'D1', 'D2'],
       sillBoltSeismicCategories: ['C', 'D0', 'D1', 'D2'],
       minFootingWidthIn: 18,
+      minBearingLengthIn: 1.5,
       minBearingToleranceIn: 0.05,
     })
 
     const roofRule = getIrcRuleById('irc-r802-roof-framing-envelope')
     expect(roofRule.trade).toBe('structural')
     expect(roofRule.kind).toBe('elevation-band')
-    expect(roofRule.params.roofMarginM).toBe(0.08)
+    expect(roofRule.params.roofMarginM).toBe(-0.08)
+    expect(roofRule.params.atticThresholdOffsetM).toBeUndefined()
     expect(IRC_ROOF_ENVELOPE_THRESHOLDS.warningProtrusionM).toBe(0.08)
     expect(IRC_ROOF_ENVELOPE_THRESHOLDS.errorProtrusionM).toBe(0.15)
 
@@ -384,8 +386,8 @@ describe('Kernel Layer 2/3 Adoption — Single-Source Declarative IRC Rule Engin
         {
           id: 'ahu_warn',
           kind: 'hvac:equipment',
-          pos: [2, 2.95, 2],
-          roofSurfaceYM: 3.0, // within 0.08m roofMarginM -> warning
+          pos: [2, 3.11, 2],
+          roofSurfaceYM: 3.0, // protrudes +0.11m > +0.08m roofMarginM (-0.08) -> warning
         },
       ],
       { trade: 'structural', tool: 'structural_audit_irc' },

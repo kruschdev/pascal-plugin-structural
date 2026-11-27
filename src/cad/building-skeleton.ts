@@ -26,6 +26,7 @@ import {
   type SceneNodeLike as KernelSceneNodeLike,
   type RoofSegmentKind,
   clipSegmentToPolygon2D,
+  compileBuildingAnatomy,
   distancePointToSegment2D,
   evaluateRoofSegmentSurfaceY,
   extractCanonicalRoofSegments,
@@ -45,7 +46,13 @@ import {
   Quaternion,
   Vector3,
 } from 'three'
-import { clusterLevelFootprints, computeLevelBounds, extractWallOpenings } from '../irc/openings'
+import {
+  clusterLevelFootprints,
+  computeLevelBounds,
+  extractWallOpenings,
+  normalizeCanonicalWallOpenings,
+  resolveWallHeightM,
+} from '../irc/openings'
 import {
   type FloorSystemKind,
   INCHES_TO_METERS,
@@ -234,7 +241,7 @@ function resolveCanonicalRoofFrame(seg: ExtractedRoofSegment): CanonicalRoofFram
   }
   if (seg.roofType === 'conical') {
     const radius = Math.min(seg.widthM, seg.depthM) / 2
-    const riseM = Math.max(0.25, radius * slopeTan)
+    const riseM = radius * slopeTan
     return {
       effYaw: seg.yaw,
       effWidth: seg.widthM,
@@ -242,13 +249,13 @@ function resolveCanonicalRoofFrame(seg: ExtractedRoofSegment): CanonicalRoofFram
       halfW: radius,
       halfRun: radius,
       riseM,
-      effSlopeTan: riseM / Math.max(0.1, radius),
+      effSlopeTan: slopeTan,
       swappedAxes: false,
     }
   }
   if (seg.roofType === 'mansard') {
     const inset = Math.min(effWidth, effDepth) * 0.18
-    const riseM = Math.min(2.2, Math.max(0.25, inset * slopeTan))
+    const riseM = Math.min(2.2, inset * slopeTan)
     return {
       effYaw,
       effWidth,
@@ -256,12 +263,12 @@ function resolveCanonicalRoofFrame(seg: ExtractedRoofSegment): CanonicalRoofFram
       halfW,
       halfRun,
       riseM,
-      effSlopeTan: riseM / Math.max(0.1, inset),
+      effSlopeTan: inset > 1e-6 ? riseM / inset : 0,
       swappedAxes,
     }
   }
   if (seg.roofType === 'dutch') {
-    const riseM = Math.max(0.25, Math.min(halfRun * slopeTan, halfRun * 1.35))
+    const riseM = Math.min(halfRun * slopeTan, halfRun * 1.35)
     return {
       effYaw,
       effWidth,
@@ -269,11 +276,11 @@ function resolveCanonicalRoofFrame(seg: ExtractedRoofSegment): CanonicalRoofFram
       halfW,
       halfRun,
       riseM,
-      effSlopeTan: riseM / Math.max(0.1, halfRun),
+      effSlopeTan: halfRun > 1e-6 ? riseM / halfRun : 0,
       swappedAxes,
     }
   }
-  const riseM = Math.max(0.25, halfRun * slopeTan)
+  const riseM = halfRun * slopeTan
   return {
     effYaw,
     effWidth,
@@ -281,7 +288,7 @@ function resolveCanonicalRoofFrame(seg: ExtractedRoofSegment): CanonicalRoofFram
     halfW,
     halfRun,
     riseM,
-    effSlopeTan: riseM / Math.max(0.1, halfRun),
+    effSlopeTan: slopeTan,
     swappedAxes,
   }
 }
@@ -930,6 +937,11 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
   // ============================================================================
   // 1. WALL FRAMING + FRAMED OPENINGS + FOUNDATION + DISTRIBUTED WALL HARDWARE
   // ============================================================================
+  const anatomy = compileBuildingAnatomy(nodes as Readonly<Record<string, KernelSceneNodeLike>>)
+  const canonicalWallsById = new Map<string, CanonicalWall>()
+  for (const cw of anatomy.getWalls(levelId)) {
+    canonicalWallsById.set(cw.id, cw)
+  }
   const fdnTopOffset = showFloor ? jDepthM + 0.02 : 0.02
   for (const wall of walls) {
     const rawOv = wallOverrides[wall.id]
@@ -983,7 +995,12 @@ export function buildBuildingSkeletonGroup(opts: BuildingSkeletonOptions): Group
       continue
     }
 
-    const openings = extractWallOpenings(nodes, wall)
+    const canonicalWall = canonicalWallsById.get(wall.id)
+    const openings = canonicalWall
+      ? normalizeCanonicalWallOpenings(canonicalWall.openings, wallLenM, resolveWallHeightM(nodes, wall, 2.55))
+      : wall.visible === false
+        ? extractWallOpenings(nodes, wall)
+        : []
     const doubleTopBottomY = baseY + wallH - PLATE_THICK_M * 2
     const studBaseY = baseY + PLATE_THICK_M
     const fullStudH = Math.max(0.2, doubleTopBottomY - studBaseY)

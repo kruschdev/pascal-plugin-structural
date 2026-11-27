@@ -38,6 +38,8 @@ const result = await Bun.build({
     'zod',
     'zustand',
     '@pascal-app/*',
+    '@kruschdev/pascal-mep-kernel',
+    '@kruschdev/pascal-mep-kernel/*',
   ],
   throw: false,
 })

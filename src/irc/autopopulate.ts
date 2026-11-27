@@ -7,11 +7,20 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
-import { evaluatePlacementCandidate } from '@kruschdev/pascal-mep-kernel'
+import {
+  type CanonicalWall,
+  type SceneNodeLike as KernelSceneNodeLike,
+  compileBuildingAnatomy,
+} from '@kruschdev/pascal-mep-kernel'
 import { deriveRequiredFirestops } from './fireblocking'
 import { evaluateBracedWallLines } from './load-path'
-import { clusterLevelFootprints, extractWallOpenings, resolveWallHeightM } from './openings'
-import { getIrcRuleById, isHighSeismicCategory } from './rules'
+import {
+  clusterLevelFootprints,
+  extractWallOpenings,
+  normalizeCanonicalWallOpenings,
+  resolveWallHeightM,
+} from './openings'
+import { evaluateIrcWindSeismicCandidate, isHighSeismicCategory } from './rules'
 import {
   selectBeamHangerSku,
   selectHurricaneTieSku,
@@ -381,6 +390,11 @@ export function autopopulateStructuralScene(
   }
 
   // 4. Size & emit `structural:beam` headers for every door & window opening (native + Pascal `item` openings)
+  const anatomy = compileBuildingAnatomy(nodes as Readonly<Record<string, KernelSceneNodeLike>>)
+  const canonicalWallsById = new Map<string, CanonicalWall>()
+  for (const cw of anatomy.getWalls(levelId)) {
+    canonicalWallsById.set(cw.id, cw)
+  }
   for (const hostWall of walls) {
     const ws = hostWall.start!
     const we = hostWall.end!
@@ -391,7 +405,12 @@ export function autopopulateStructuralScene(
     const yaw = Math.atan2(-(we[1] - ws[1]), we[0] - ws[0])
     const wallH = resolveWallHeightM(nodes, hostWall, defaultWallHeightM)
     const wallBaseY = typeof hostWall.elevation === 'number' && Number.isFinite(hostWall.elevation) ? hostWall.elevation : 0
-    const wallOpenings = extractWallOpenings(nodes, hostWall)
+    const canonicalWall = canonicalWallsById.get(hostWall.id)
+    const wallOpenings = canonicalWall
+      ? normalizeCanonicalWallOpenings(canonicalWall.openings, lenM, wallH)
+      : hostWall.visible === false
+        ? extractWallOpenings(nodes, hostWall)
+        : []
 
     for (const op of wallOpenings) {
       const opWidthM = op.widthM
@@ -911,30 +930,29 @@ export function autopopulateStructuralScene(
 
   // 7. Lateral Bracing, High-Wind Uplift Straps & Seismic Hold-Downs / Plate Washers
   // Read wind/seismic thresholds directly from the single-source IRC declarative rule table
-  const windSeismicRule = getIrcRuleById('irc-r802-11-wind-seismic-uplift')
-  const highWind = !evaluatePlacementCandidate(
-    [windSeismicRule],
+  const needsStraps = !evaluateIrcWindSeismicCandidate(
     {
       kind: 'structural:assembly',
       pos: [minX, levelBaseY, minZ],
       designWindMph: design.windMph,
+      seismicDesignCategory: design.seismicCategory,
       hasStrap: false,
     },
     'placement',
   ).legal
   const highSeismic = isHighSeismicCategory(design.seismicCategory)
-  const needsHeavyStrap = !evaluatePlacementCandidate(
-    [windSeismicRule],
+  const needsHeavyStrap = !evaluateIrcWindSeismicCandidate(
     {
       kind: 'structural:assembly',
       pos: [minX, levelBaseY, minZ],
       designWindMph: design.windMph,
+      seismicDesignCategory: design.seismicCategory,
       hasHeavyStrap: false,
     },
     'placement',
   ).legal
 
-  if (highWind || design.storiesAbove >= 1) {
+  if (needsStraps || design.storiesAbove >= 1) {
     const strapSku = needsHeavyStrap ? 'MSTC40' : 'MSTA36'
     const strapQty = Math.max(8, Math.ceil(((footprintWidthFt + footprintDepthFt) * 2) / 12))
     emitConnector({
@@ -1008,8 +1026,7 @@ export function autopopulateStructuralScene(
     }
   }
 
-  const needsSillBolts = !evaluatePlacementCandidate(
-    [windSeismicRule],
+  const needsSillBolts = !evaluateIrcWindSeismicCandidate(
     {
       kind: 'structural:assembly',
       pos: [(minX + maxX) / 2, levelBaseY, minZ],
