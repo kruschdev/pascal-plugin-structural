@@ -2,15 +2,22 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-amber.svg)](./LICENSE)
 [![Pascal Plugin API v1](https://img.shields.io/badge/Pascal_Plugin_API-v1-38bdf8.svg)](https://github.com/pascalorg/editor)
+[![Kernel](https://img.shields.io/badge/Kernel-%40kruschdev%2Fpascal--mep--kernel-a78bfa.svg)](https://github.com/kruschdev/pascal-mep-kernel)
 [![3D CAD Models](https://img.shields.io/badge/MIT_3D_CAD_Models-62_.glb-10b981.svg)](./docs/CAD-CATALOG.md)
-[![IRC/NDS Tests](https://img.shields.io/badge/Tests-55%2F55_Passing-22c55e.svg)](./src/__tests__)
+[![IRC/NDS Tests](https://img.shields.io/badge/Tests-104%2F104_Passing-22c55e.svg)](./src/__tests__)
 
 An open-source, MIT-licensed **Residential and Light-Commercial IRC / AWC NDS / WFCM / AISC Structural Framing** plugin for [Pascal Editor](https://github.com/pascalorg/editor) (`pluginId: krusch:structural`).
 
-I built this as a standalone external plugin implementing Pascal's full Plugin API v1 and `E-016` agent contracts so it drops cleanly into any Pascal host without requiring upstream core merges. It anchors **Priority #1** in the 4-trade right-of-way hierarchy (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`).
+I built this as a standalone external plugin implementing Pascal's full Plugin API v1 and `E-016` agent contracts on top of [`@kruschdev/pascal-mep-kernel`](https://github.com/kruschdev/pascal-mep-kernel) so it drops cleanly into any Pascal host without requiring upstream core merges. It anchors **Priority #1** in the 4-trade right-of-way hierarchy (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`), sharing exact roof planes, 3D opening prisms, concave footprints, rotated beam/column OBBs, and single-source declarative IRC rules with the rest of the MEP stack.
 
 > [!NOTE]
-> **Early Development Status:** This plugin is still in the beginning stages of being refined and is not yet at the same level of polish, depth, or completeness as my [Pascal Electrical Plugin (`@kruschdev/pascal-plugin-electrical`)](https://github.com/kruschdev/pascal-plugin-electrical). Expect active iteration on layout rules, 3D framing, and edge cases as I continue building it out.
+> **Active Iteration:** Verified with `104 / 104` deterministic unit tests (`1,493` assertions), `5 / 5` entry boundary gates, and audited across `246` real public Pascal buildings (`0` crashes, `0/0/0/0` errors on two-story Aymeric House alongside Plumbing, HVAC, and Electrical). I am still actively expanding framing edge cases and connector details across complex multi-roof architectures.
+
+## 4-Trade Coordinated Cutaway (Shared `@kruschdev/pascal-mep-kernel`)
+
+![Aymeric House Finished Architecture vs 4-Trade Coordinated MEP Cutaway powered by @kruschdev/pascal-mep-kernel](https://raw.githubusercontent.com/kruschdev/pascal-mep-kernel/main/assets/social-preview.png)
+
+Watch the full two-story Aymeric House finished-to-cutaway walkthrough (Structural -> Plumbing -> Dual-Wing HVAC -> Electrical, `1,412` coordinated nodes, `0/0/0/0` errors) in [`@kruschdev/pascal-mep-kernel`](https://github.com/kruschdev/pascal-mep-kernel).
 
 ## Walkthrough Video (Recorded Live in Pascal Editor)
 
@@ -52,7 +59,7 @@ I built this as a standalone external plugin implementing Pascal's full Plugin A
 4. **47-SKU Simpson-Class Connector and Hardware Catalog**: Clean-room MIT galvanized-steel 3D CAD models and ASD uplift/download/lateral capacities across all 10 hardware families: **Hurricane Ties** (`H1`, `H2.5A`, `H10A`, `HGA10`, `MTS16`, `HTS20`), **Framing Angles and Clips** (`A35`, `A34`, `LTP4`, `L50`, `LS50`), **Joist and Beam Hangers** (`LUS26` to `LUS212`, `HUS210`, `LSSU210`, `IUS2.56/11.88`, `MIT411.88`, `HHUS210-2`, `HHUS410`, `HHUS5.50/10`, `HGUS5.50/12`, `HUCQ410-SDS`), **Post Bases and Caps** (`ABU44Z` to `ABU66Z`, `CB44`/`CB66`, `BC4`, `LPC4Z`/`LPC6Z`, `CCQ46`/`CCQ66`), **Hold-Downs and Straps** (`HDU2` to `HDU11`, `STHD14`, `LSTA24`, `MSTA36`, `MSTC40`, `CS16`, `CS-PF`), and **Seismic Anchorage** (`BP3x3` plate washers, `SSTB16` anchor bolts).
 5. **Complete `IRC R302.11` Fire Blocking and `IRC R302.12` Draftstopping**: Derives, models, and audits all 8 code-mandated firestop planes: `10 ft` vertical stud cavities (`R302.11(2)`), furred walls (`R302.11(2)`), soffits and drop ceilings (`R302.11(1)`), stair stringers top and bottom (`R302.11(3)`), vertical chases and chimneys (`R302.11(4)`), MEP pipe/conduit/duct plate penetration collars (`R302.11(5)`), floor-ceiling draftstopping (`<= 1,000 sq ft`, `R302.12`), and attic draftstopping (`<= 3,000 sq ft`, `R302.12.1`).
 6. **Continuous Load-Path Tracing and `IRC R602.10` Braced Wall Lines**: Traces gravity loads from beams through columns, TJI squash blocks, and spread pad footings (`IRC R403.1`), audits continuous wind/seismic uplift paths, and evaluates `R602.10` braced wall percentages with `CS-PF` portal and engineered shear-wall escalation.
-7. **Priority #1 Cross-Trade Interop and Scope Notes**: Persists 5 clean scene-graph nodes (`structural:assembly`, `structural:beam`, `structural:column`, `structural:connector`, `structural:firestop`) so `@kruschdev/pascal-plugin-plumbing`, `@kruschdev/pascal-plugin-hvac`, and `@kruschdev/pascal-plugin-electrical` automatically snap to real studs, route around LVL/Glulam/steel beams and columns as inviolable no-bore keep-outs, and coordinate `R302.11(5)` penetration firestops with zero hard npm dependencies. `auditStructuralScene` enforces per-level beam and column MEP clashes directly (while stud `IRC R602.6` bore/notch rules and TJI web-hole clearances are checked by downstream MEP trade routers against published `structural:assembly` and `TJI_IJOIST_CATALOG` metadata). The priced BOM quantifies wall studs and plates, persisted beams, columns and spread pad footings, Simpson-class connectors, and firestop assemblies (excluding field floor joists, roof rafters/trusses, sheathing, and continuous strip footings).
+7. **Priority #1 Cross-Trade Interop and Kernel Parity**: Persists 5 clean scene-graph nodes (`structural:assembly`, `structural:beam`, `structural:column`, `structural:connector`, `structural:firestop`) and shares [`@kruschdev/pascal-mep-kernel`](https://github.com/kruschdev/pascal-mep-kernel) (`7`-type canonical roof shell, raised-heel roof framing, uncovered flat-roof joists, rotated OBB clash detection, and declarative IRC wind/seismic/bearing rules) so `@kruschdev/pascal-plugin-plumbing`, `@kruschdev/pascal-plugin-hvac`, and `@kruschdev/pascal-plugin-electrical` automatically snap to real studs, route around LVL/Glulam/steel beams and columns as inviolable no-bore keep-outs, and coordinate `R302.11(5)` penetration firestops with zero cross-plugin npm coupling. `auditStructuralScene` enforces per-level beam and column MEP clashes directly (while stud `IRC R602.6` bore/notch rules and TJI web-hole clearances are checked by downstream MEP trade routers against published `structural:assembly` and `TJI_IJOIST_CATALOG` metadata). The priced BOM quantifies wall studs and plates, persisted beams, columns and spread pad footings, Simpson-class connectors, and firestop assemblies (excluding field floor joists, roof rafters/trusses, sheathing, and continuous strip footings).
 
 ## Documentation
 
@@ -113,7 +120,7 @@ setPluginDiscovery(async () => [structuralRenderPlugin])
 
 ```bash
 bun install
-bun run check          # tsc --noEmit + bun test src (55/55 tests) + 5/5 entry gates + dist/ build + Turbopack chunk gate
+bun run check          # tsc --noEmit + bun test src (104/104 tests) + 5/5 entry gates + dist/ build + Turbopack chunk gate
 bun run export:cad     # Export all 62 clean-room .glb structural CAD models + catalog.json to assets/cad/
 bun scripts/render-cad-thumbnails.ts     # Re-render all 62 studio thumbnails + 6x11 contact sheet
 bun scripts/render-structural-cutaways.ts # Re-render 4-panel 3D structural assembly cutaways
